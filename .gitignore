@@ -1,0 +1,45 @@
+# Build output (JUCE comes from PASTEL_JUCE_DIR or is fetched by CMake, artefacts regenerate)
+build/
+cmake-build-*/
+out/
+
+# Compiled objects / libs (always under build/, belt and braces)
+*.o
+*.a
+*.so
+*.dll
+*.dylib
+
+# Editors / OS noise
+.vscode/
+.idea/
+.cache/
+*~
+*.swp
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+
+# EditorShot renders (regenerated on every run)
+/board_*.png
+/panel_*.png
+/shot_*.png
+
+# Local test / packaging scratch (regenerable)
+*.zip
+*.tar.gz
+*.log
+
+# UI mockups and their generators (not part of the plugin)
+/svg-min/
+/svg-exp/
+/grid.svg
+/01_song.svg
+/grid.html
+/all-effects.html
+/generate_svg.py
+/generate_v2.py
+/build_pages.py
+/fx_data.py
