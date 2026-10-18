@@ -263,7 +263,10 @@ struct GrainPitch
     void reset() { std::fill (buf.begin(), buf.end(), 0.0f); w = 0; for (auto& x : g) x.on = false; spawn = 0.0; }
     inline float read (double pos) const
     {
-        if (pos < (double) (w - size + 2) || pos > (double) (w - 1)) return 0.0f;
+        // only what is still in the buffer: never before the first sample
+        // written (early on w - size is negative) and never NaN
+        const double lo = (double) juce::jmax (0LL, w - size + 2), hi = (double) (w - 1);
+        if (! (pos >= lo && pos <= hi)) return 0.0f;
         const long long i0 = (long long) pos;
         const float fr = (float) (pos - (double) i0);
         const float a = buf[(size_t) (i0 % size)], b = buf[(size_t) ((i0 + 1) % size)];
