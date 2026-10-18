@@ -26,7 +26,7 @@ FetchContent_MakeAvailable(JUCE)
 juce_add_plugin(PastelEfxGrid
     COMPANY_NAME "Pastel EFX"
     BUNDLE_ID "com.pastelefx.efxgrid"
-    DESCRIPTION "Pastel EFX Grid - a 4x4 grid of effect slots, any of 89 effects per slot"
+    DESCRIPTION "Pastel EFX Grid - a 4x4 grid of effect slots, any of 91 effects per slot"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE
