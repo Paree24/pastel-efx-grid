@@ -3,6 +3,7 @@
 //
 //   EditorShot <outdir>            grid + a set of expanded panels
 //   EditorShot <outdir> all        an expanded panel for every effect
+#include <algorithm>
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
@@ -35,8 +36,17 @@ static void check (bool ok, const juce::String& what)
     std::printf ("%s %s\n", ok ? "  ok  " : "  FAIL", what.toRawUTF8());
 }
 
+// CI: report a crash with a stack trace instead of dying silently
+static void reportCrash (void*)
+{
+    std::printf ("\nCRASH\n%s\n", juce::SystemStats::getStackBacktrace().toRawUTF8());
+    std::fflush (stdout);
+}
+
 int main (int argc, char** argv)
 {
+    std::setvbuf (stdout, nullptr, _IONBF, 0);   // unbuffered: CI keeps the output even if we crash
+    juce::SystemStats::setApplicationCrashHandler (reportCrash);
     juce::ScopedJuceInitialiser_GUI init;
     const juce::File dir = argc > 1 ? juce::File (argv[1]) : juce::File::getCurrentWorkingDirectory();
     const bool all = argc > 2 && juce::String (argv[2]) == "all";
@@ -599,7 +609,7 @@ int main (int argc, char** argv)
                     e += we;
                     win.push_back (10.0 * std::log10 (we / (double) w + 1e-12));
                 }
-                rmsDb = 10.0 * std::log10 (e / (double) juce::jmax<size_t> (1, x.size()) + 1e-12);
+                rmsDb = 10.0 * std::log10 (e / (double) std::max<size_t> (1, x.size()) + 1e-12);
                 peakDb = 20.0 * std::log10 (pk + 1e-12);
                 std::sort (win.begin(), win.end());
                 // loud moments vs typical ones (95th vs 50th percentile of 10 ms levels)

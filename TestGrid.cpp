@@ -9,6 +9,7 @@
 //   macro        the default macro routing must change the output
 //   mix / bypass mix 0 and bypass must return the dry signal exactly
 //   cpu          real-time factor per effect
+#include <algorithm>
 #include "dsp/Effects.h"
 #include <juce_core/juce_core.h>
 #include <cstdio>
@@ -107,7 +108,7 @@ double rmsDb (const std::vector<float>& a)
 {
     double s = 0.0;
     for (float v : a) s += (double) v * v;
-    return 10.0 * std::log10 (juce::jmax (1.0e-20, s / juce::jmax<size_t> (1, a.size())));
+    return 10.0 * std::log10 (juce::jmax (1.0e-20, s / std::max<size_t> (1, a.size())));
 }
 
 // controls that only change what the panel shows
@@ -313,7 +314,7 @@ std::vector<float> runSignal (int id, const std::vector<std::pair<const char*, f
     double ppq = 0.0;
     for (size_t off = 0; off < in.size(); off += 512)
     {
-        const int n = (int) juce::jmin<size_t> (512, in.size() - off);
+        const int n = (int) std::min<size_t> (512, in.size() - off);
         for (int i = 0; i < n; ++i) L[(size_t) i] = R[(size_t) i] = in[off + (size_t) i];
         SlotInput si; si.norm = r.norm; si.macroDepth = r.depth; si.mix = r.mix; si.mode = r.mode; si.bpm = 120.0; si.ppq = ppq; si.playing = true;
         fx.process (L.data(), R.data(), n, si);
@@ -336,7 +337,7 @@ double bandDb (const std::vector<float>& x, float lo, float hi, size_t from, siz
         const float y = l2.process (l1.process (h2.process (h1.process (x[i]))));
         if (i >= from) e += (double) y * y;
     }
-    return 10.0 * std::log10 (juce::jmax (1.0e-20, e / (double) juce::jmax<size_t> (1, to - from)));
+    return 10.0 * std::log10 (juce::jmax (1.0e-20, e / (double) std::max<size_t> (1, to - from)));
 }
 
 // level (dB) of one exact frequency over [from, to) (Goertzel)
@@ -500,7 +501,7 @@ static int runSignalTests()
             std::vector<float> out (in.size()), L (512), R (512), sl (512, 0.0f), sr2 (512, 0.0f);
             for (size_t off = 0; off < in.size(); off += 512)
             {
-                const int n = (int) juce::jmin<size_t> (512, in.size() - off);
+                const int n = (int) std::min<size_t> (512, in.size() - off);
                 for (int i = 0; i < n; ++i)
                 {
                     L[(size_t) i] = R[(size_t) i] = in[off + (size_t) i];
@@ -773,8 +774,17 @@ static int runSignalTests()
     return checkFails - before;
 }
 
+// CI: report a crash with a stack trace instead of dying silently
+static void reportCrash (void*)
+{
+    std::printf ("\nCRASH\n%s\n", juce::SystemStats::getStackBacktrace().toRawUTF8());
+    std::fflush (stdout);
+}
+
 int main()
 {
+    std::setvbuf (stdout, nullptr, _IONBF, 0);   // unbuffered: CI keeps the output even if we crash
+    juce::SystemStats::setApplicationCrashHandler (reportCrash);
     int failures = 0, warnings = 0;
     std::mt19937 rng (12345);
     std::uniform_real_distribution<float> uni (0.0f, 1.0f);
