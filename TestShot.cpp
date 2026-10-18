@@ -680,7 +680,10 @@ int main (int argc, char** argv)
             {
                 const float dlt = std::abs (before[i] - mutated[i]);
                 if (dlt > 1e-5f) ++changed;
-                if (dlt < 0.9f) maxStep = juce::jmax (maxStep, dlt);   // (choice flips can jump)
+                // continuous knobs only: a choice may flip to any option
+                const auto* def = efx::defForId (proc.getSlotEffectId ((int) (i / 16)));
+                const int k = (int) (i % 16);
+                if (def != nullptr && k < def->numParams && ! def->p[k].isChoice()) maxStep = juce::jmax (maxStep, dlt);
             }
             check (changed >= 8 && maxStep <= 0.3f * 0.25f + 1e-4f, "mutate: small moves (max " + juce::String (maxStep, 3) + ")");
             proc.randomizeSlot (0, 0.8f);
