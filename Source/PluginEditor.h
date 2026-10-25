@@ -211,6 +211,7 @@ private:
     juce::Rectangle<int> headerArea, boardArea;
     // header: preset bar, randomize / mutate for the whole chain
     juce::TextButton presetPrev { "<" }, presetNext { ">" }, presetBtn, randAllBtn { "RANDOM" }, mutAllBtn { "MUTATE" };
+    pastel::MidiLearnButton midiBtn;
     PresetBrowser browser;
     juce::String shownPreset;
     void presetChanged();

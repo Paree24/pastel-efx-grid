@@ -51,6 +51,12 @@ int main (int argc, char** argv)
     const juce::File dir = argc > 1 ? juce::File (argv[1]) : juce::File::getCurrentWorkingDirectory();
     const bool all = argc > 2 && juce::String (argv[2]) == "all";
     dir.createDirectory();
+    {
+        // MIDI learn maps go to a scratch folder, never the user's ~/.config
+        auto learnDir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("efxgrid-shot-midilearn");
+        learnDir.deleteRecursively();
+        pastel::MidiLearn::setDirectoryForTest (learnDir);
+    }
 
     EfxGridProcessor proc;
     proc.prepareToPlay (48000.0, 512);
@@ -75,6 +81,89 @@ int main (int argc, char** argv)
             proc.processBlock (buf, midi);
         }
     };
+
+    // ---- MIDI learn ------------------------------------------------------------
+    std::printf ("== MIDI learn ==\n");
+    {
+        using Enc = pastel::MidiLearn::Enc;
+        auto det = [] (std::vector<int> v) { return pastel::MidiLearn::detectEncoding (v); };
+        check (det ({ 65, 65, 65, 65 }) == Enc::offset64 && det ({ 63, 62, 63 }) == Enc::offset64, "Arturia-style 64+n encoder detected");
+        check (det ({ 1, 1, 2, 1 }) == Enc::twos && det ({ 127, 127, 126 }) == Enc::twos, "two's complement encoder detected");
+        check (det ({ 60, 61, 62, 63 }) == Enc::absolute && det ({ 0, 1, 2, 3 }) == Enc::absolute
+                   && det ({ 127, 126, 125, 124 }) == Enc::absolute, "turned absolute knob stays absolute");
+
+        auto cc = [] (int num, int val) { juce::MidiBuffer m; m.addEvent (juce::MidiMessage::controllerEvent (1, num, val), 0); return m; };
+        check (proc.acceptsMidi(), "the effect accepts MIDI (for learned knobs)");
+        auto& ml = proc.midiLearn;
+        ml.clearAll();
+        auto* mix = proc.apvts.getParameter (EfxGridProcessor::paramId (0, "mix"));
+        mix->setValueNotifyingHost (0.5f);
+        ml.setLearning (true);
+        mix->beginChangeGesture(); mix->endChangeGesture();   // touching the knob on screen arms it
+        check (ml.getArmedName() == mix->getName (40), "touching a control arms it");
+        const float before = mix->getValue();
+        for (int i = 0; i < 4; ++i) ml.process (cc (74, 65));
+        check (std::abs (mix->getValue() - before) < 1e-6f, "learning CCs never move the armed control");
+        ml.tick();
+        auto maps = ml.getMappings();
+        check (maps.size() == 1 && maps[0].cc == 74 && maps[0].paramId == EfxGridProcessor::paramId (0, "mix") && maps[0].enc == Enc::offset64,
+               "CC 74 learned as a relative knob on slot 1 mix");
+        ml.setLearning (false);
+        {
+            juce::AudioBuffer<float> b (2, 512);
+            b.clear();
+            auto m = cc (74, 66);
+            proc.processBlock (b, m);   // through the real audio path
+        }
+        const float up = mix->getValue();
+        ml.process (cc (74, 62));
+        check (up > before && mix->getValue() < up, "endless knob turns the mix the right way both directions (via processBlock)");
+
+        {
+            EfxGridProcessor b;
+            auto* mixB = b.apvts.getParameter (EfxGridProcessor::paramId (0, "mix"));
+            mixB->setValueNotifyingHost (0.5f);
+            b.midiLearn.process (cc (74, 70));
+            check (b.midiLearn.getMappings().size() == 1 && mixB->getValue() > 0.5f, "mapping is global: a new instance has it");
+        }
+
+        ml.setLearning (true);
+        mix->beginChangeGesture(); mix->endChangeGesture();
+        for (int v : { 10, 11, 12, 13 }) ml.process (cc (21, v));
+        ml.tick();
+        maps = ml.getMappings();
+        check (maps.size() == 1 && maps[0].cc == 21 && maps[0].enc == Enc::absolute, "re-learning moves the control to the new knob");
+        ml.setLearning (false);
+        ml.process (cc (21, 127));
+        check (std::abs (mix->getValue() - 1.0f) < 1e-6f, "absolute knob sets the value directly");
+
+        int stepped = 0;
+        auto keep = ml.onPresetStep;
+        ml.onPresetStep = [&] (int d) { stepped += d; };
+        ml.armPresetKnob();
+        ml.process (cc (114, 1));
+        for (int i = 0; i < 10; ++i) ml.tick();
+        check (ml.getPresetKnobCC() == 114, "preset knob learned from one nudge");
+        ml.process (cc (114, 1)); ml.process (cc (114, 3)); ml.tick();
+        ml.process (cc (114, 127)); ml.tick();
+        check (stepped == 1, "preset knob: two steps forward, one back");
+        ml.onPresetStep = keep;
+
+        {
+            EfxGridProcessor c;
+            c.prepareToPlay (48000.0, 512);
+            const auto name0 = c.presetName;
+            c.midiLearn.process (cc (114, 1));
+            c.midiLearn.tick();
+            const auto name1 = c.presetName;
+            c.midiLearn.process (cc (114, 127));
+            c.midiLearn.tick();
+            check (name1 != name0 && c.presetName != name1, "preset knob steps the chain presets in a new instance (" + name0 + " -> " + name1 + " -> " + c.presetName + ")");
+        }
+        ml.clearAll();
+        check (ml.getMappings().empty() && ml.getPresetKnobCC() < 0, "clear all");
+        mix->setValueNotifyingHost (1.0f);
+    }
 
     // ---- slot model checks -------------------------------------------------
     std::printf ("== slot model ==\n");

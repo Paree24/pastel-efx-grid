@@ -28,7 +28,7 @@ juce_add_plugin(PastelEfxGrid
     BUNDLE_ID "com.pastelefx.efxgrid"
     DESCRIPTION "Pastel EFX Grid - a 4x4 grid of effect slots, any of 91 effects per slot"
     IS_SYNTH FALSE
-    NEEDS_MIDI_INPUT FALSE
+    NEEDS_MIDI_INPUT TRUE    # MIDI-learned knobs (Source/MidiLearn.*) drive the slots
     NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
@@ -73,6 +73,7 @@ set(PASTEL_UI_SOURCES
     Source/Presets.cpp
     Source/PresetBrowser.cpp
     Source/Theme.cpp
+    Source/MidiLearn.cpp
 )
 
 target_sources(PastelEfxGrid PRIVATE ${PASTEL_UI_SOURCES} ${PASTEL_DSP_SOURCES})

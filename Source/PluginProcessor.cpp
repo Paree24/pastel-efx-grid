@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "Presets.h"
 
 juce::String EfxGridProcessor::paramId (int slot, const juce::String& suffix)
 {
@@ -60,6 +61,7 @@ EfxGridProcessor::EfxGridProcessor()
     }
     startTimerHz (10);   // retired-instance purge + effect idle work
     setLatencySamples (0);
+    midiLearn.onPresetStep = [this] (int delta) { presets::step (*this, delta); };
 }
 
 EfxGridProcessor::~EfxGridProcessor()
@@ -464,9 +466,10 @@ void EfxGridProcessor::timerCallback()
 }
 
 // ------------------------------------------------------------------ audio
-void EfxGridProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void EfxGridProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
+    midiLearn.process (midi);   // learned CCs land before the chain runs
     const int n = buffer.getNumSamples();
     if (n <= 0 || buffer.getNumChannels() < 2) return;
 

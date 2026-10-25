@@ -2,6 +2,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "dsp/Effects.h"
+#include "MidiLearn.h"
 
 // ============================================================
 // 16 slots in series. Each slot owns one GridEffect, rebuilt on the message
@@ -36,7 +37,7 @@ public:
     bool hasEditor() const override { return true; }
 
     const juce::String getName() const override { return "Pastel EFX Grid"; }
-    bool acceptsMidi() const override { return false; }
+    bool acceptsMidi() const override { return true; }   // only for MIDI learn: notes are ignored
     bool producesMidi() const override { return false; }
     double getTailLengthSeconds() const override { return 10.0; }
 
@@ -84,6 +85,7 @@ public:
     void mutateChain (float amount);
     void randomNewChain();                    // a fresh chain of 3-5 random effects
     juce::AudioProcessorValueTreeState apvts;
+    pastel::MidiLearn midiLearn { *this, "Pastel EFX Grid" };   // global CC map + preset knob
 
     // ---- editor helpers --------------------------------------------------
     static juce::String paramId (int slot, const juce::String& suffix);

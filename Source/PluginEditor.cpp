@@ -1098,7 +1098,7 @@ void ExpandedPanel::paint (juce::Graphics& g)
 // ============================================================
 // EfxGridEditor
 // ============================================================
-EfxGridEditor::EfxGridEditor (EfxGridProcessor& p) : juce::AudioProcessorEditor (p), undoSteps (p), proc (p), overlay (p), browser (p)
+EfxGridEditor::EfxGridEditor (EfxGridProcessor& p) : juce::AudioProcessorEditor (p), undoSteps (p), proc (p), overlay (p), midiBtn (p.midiLearn), browser (p)
 {
     lnf = std::make_unique<PastelLookAndFeel>();
     setLookAndFeel (lnf.get());
@@ -1134,6 +1134,7 @@ EfxGridEditor::EfxGridEditor (EfxGridProcessor& p) : juce::AudioProcessorEditor 
     presetPrev.onClick = [this] { presets::step (proc, -1); presetChanged(); };
     presetNext.onClick = [this] { presets::step (proc, 1); presetChanged(); };
     presetPrev.setTooltip ("Previous preset"); presetNext.setTooltip ("Next preset");
+    midiBtn.setColour (juce::TextButton::buttonOnColourId, PastelColors::accent);   // the LookAndFeel fills toggled buttons with accentFor()
     randAllBtn.setTooltip ("Randomize every effect's knobs around its defaults. Right-click: a random new chain");
     randAllBtn.onClick = [this]
     {
@@ -1143,7 +1144,7 @@ EfxGridEditor::EfxGridEditor (EfxGridProcessor& p) : juce::AudioProcessorEditor 
     randAllBtn.addMouseListener (this, false);
     mutAllBtn.setTooltip ("Nudge every effect's knobs a little from where they are");
     mutAllBtn.onClick = [this] { proc.mutateChain (0.3f); presetChanged(); };
-    for (auto* b : { &presetPrev, &presetNext, &presetBtn, &randAllBtn, &mutAllBtn }) { styleSmallButton (*b); addAndMakeVisible (*b); }
+    for (auto* b : { &presetPrev, &presetNext, &presetBtn, &randAllBtn, &mutAllBtn, static_cast<juce::TextButton*> (&midiBtn) }) { styleSmallButton (*b); addAndMakeVisible (*b); }
     browser.onClose = [this] { browser.setVisible (false); grabKeyboardFocus(); };
     presetBtn.setButtonText (proc.presetName); shownPreset = proc.presetName;
     browser.onPresetChanged = [this] { presetChanged(); };
@@ -1265,8 +1266,10 @@ void EfxGridEditor::resized()
         auto h = headerArea.reduced (20, 8);
         h.removeFromRight (60);   // chain count
         mutAllBtn.setBounds (h.removeFromRight (78)); h.removeFromRight (6);
-        randAllBtn.setBounds (h.removeFromRight (78));
-        auto bar = headerArea.withSizeKeepingCentre (juce::jmin (320, headerArea.getWidth() - 520), 28);
+        randAllBtn.setBounds (h.removeFromRight (78)); h.removeFromRight (6);
+        midiBtn.setBounds (h.removeFromRight (60));
+        // the centred preset bar narrows on small windows so it clears MIDI (right group: 308 px + 8 gap)
+        auto bar = headerArea.withSizeKeepingCentre (juce::jmin (320, headerArea.getWidth() - 632), 28);
         presetPrev.setBounds (bar.removeFromLeft (28)); bar.removeFromLeft (4);
         presetNext.setBounds (bar.removeFromRight (28)); bar.removeFromRight (4);
         presetBtn.setBounds (bar);
