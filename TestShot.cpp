@@ -922,6 +922,138 @@ int main (int argc, char** argv)
             proc.clearUndo();
         }
 
+        // sequencer tab: screenshots, gestures, layout with 4 / 9 / 16 lanes
+        {
+            std::printf ("== sequencer tab ==\n");
+            for (int s2 = proc.chainLength() - 1; s2 >= 0; --s2) proc.clearSlotCompact (s2);
+            for (auto* n : { "Stutter", "Reverse", "Tape Stop", "Multimode Filter", "Phaser", "Bitcrusher", "Ping-Pong Delay", "Plate Reverb" })
+                proc.appendEffect (idOf (n));
+            proc.reloadSlotsNow();
+            proc.setSeqEnabled (true);
+            const uint32_t pats[8] = { 0xC0000E00u, 0x00003000u, 0x18000600u, 0u, 0x00FF0000u, 0x0u, 0x00010041u, 0xF000000Fu };
+            for (int s2 = 0; s2 < 8; ++s2) { proc.setLaneSteps (s2, 0, pats[s2]); proc.setLaneMode (s2, s2 == 3 ? seq::Always : seq::Sequenced); }
+            seq::SceneSettings sc0; sc0.steps = 32; sc0.rate = seq::kRate16th; sc0.swing = 0.12f;
+            proc.setSceneSettings (0, sc0);
+            proc.setLaneTiming (5, 0, 5, -1);
+            proc.setLaneSteps (5, 0, 0b00101u);
+            proc.setLaneTail (6, seq::Ring); proc.setLaneTail (7, seq::Ring);
+            TestPlayHead head2; head2.ppq = 2.35;
+            proc.setPlayHead (&head2);
+            juce::AudioBuffer<float> b2 (2, 512);
+            head2.playing = false; proc.requestScene (0);   // stopped: the scene switches at once
+            b2.clear(); proc.processBlock (b2, midi);
+            head2.playing = true;
+            b2.clear(); proc.processBlock (b2, midi);
+            grid->showSequencer (true);
+            grid->setSize (1180, 860); run (2);
+            auto& sv = grid->sequencerView();
+            sv.refresh();
+            writePng (grid->createComponentSnapshot (grid->getLocalBounds(), false), dir.getChildFile ("shot_sequencer.png"));
+            check (sv.laneSlots().size() == 8, "sequencer: one lane per effect (8)");
+            const int scene = sv.editScene();
+            auto click = [&] (juce::Rectangle<int> r, juce::ModifierKeys mods = {})
+            {
+                const auto pt = r.getCentre().toFloat();
+                juce::MouseEvent e (juce::Desktop::getInstance().getMainMouseSource(), pt, mods, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                    &sv, &sv, juce::Time::getCurrentTime(), pt, juce::Time::getCurrentTime(), 1, false);
+                sv.mouseDown (e); sv.mouseUp (e);
+            };
+            auto dragFromTo = [&] (juce::Point<int> a0, juce::Point<int> a1, juce::ModifierKeys mods = {})
+            {
+                const auto p0 = a0.toFloat();
+                juce::MouseEvent d0 (juce::Desktop::getInstance().getMainMouseSource(), p0, mods, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, &sv, &sv, juce::Time::getCurrentTime(), p0, juce::Time::getCurrentTime(), 1, false);
+                sv.mouseDown (d0);
+                for (int k = 1; k <= 8; ++k)
+                {
+                    const auto pk = (p0 + (a1.toFloat() - p0) * ((float) k / 8.0f));
+                    juce::MouseEvent dk (juce::Desktop::getInstance().getMainMouseSource(), pk, mods, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, &sv, &sv, juce::Time::getCurrentTime(), p0, juce::Time::getCurrentTime(), 1, true);
+                    sv.mouseDrag (dk);
+                }
+                juce::MouseEvent du (juce::Desktop::getInstance().getMainMouseSource(), a1.toFloat(), mods, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, &sv, &sv, juce::Time::getCurrentTime(), p0, juce::Time::getCurrentTime(), 1, true);
+                sv.mouseUp (du);
+            };
+            // toggle
+            const uint32_t m0 = proc.laneSteps (1, scene);
+            click (sv.cellBounds (1, 3));
+            check (proc.laneSteps (1, scene) == (m0 ^ (1u << 3)), "sequencer: click toggles a step");
+            // paint steps 8..15 on lane 4 (Phaser: they're off)
+            proc.setLaneSteps (4, scene, 0u);
+            dragFromTo (sv.cellBounds (4, 8).getCentre(), sv.cellBounds (4, 15).getCentre());
+            check (proc.laneSteps (4, scene) == 0x0000FF00u, "sequencer: drag paints steps 8-15 on");
+            // ... and painting from an on cell turns them off
+            dragFromTo (sv.cellBounds (4, 10).getCentre(), sv.cellBounds (4, 12).getCentre());
+            check (proc.laneSteps (4, scene) == 0x0000E300u, "sequencer: drag from an on step paints off");
+            // Alt-drag rotates the lane right by 2
+            proc.setLaneSteps (1, scene, 0b11u);
+            dragFromTo (sv.cellBounds (1, 0).getCentre(), sv.cellBounds (1, 2).getCentre(), juce::ModifierKeys::altModifier);
+            check (proc.laneSteps (1, scene) == 0b1100u, "sequencer: Alt-drag rotates the lane");
+            // header drag copies a lane
+            dragFromTo (sv.headerBounds (4).getCentre(), sv.headerBounds (2).getCentre());
+            check (proc.laneSteps (2, scene) == proc.laneSteps (4, scene), "sequencer: dragging a header onto a lane copies it");
+            // mode / tail / dice / scene pad
+            click (sv.modeButton (3, 1));
+            check (proc.getSlotLanes (3).mode == seq::Sequenced, "sequencer: SEQ switch");
+            click (sv.modeButton (3, 0));
+            check (proc.getSlotLanes (3).mode == seq::Always, "sequencer: ALWAYS switch");
+            click (sv.tailButton (5, 1));
+            check (proc.getSlotLanes (5).tail == seq::Cut, "sequencer: RING refused for a crusher (no tail)");
+            click (sv.tailButton (6, 0));
+            check (proc.getSlotLanes (6).tail == seq::Cut, "sequencer: CUT switch on a delay");
+            proc.setLaneSteps (0, scene, 0u);
+            click (sv.diceButton (0));
+            check (proc.laneSteps (0, scene) != 0u, "sequencer: lane dice gives steps");
+            head2.playing = false;   // stopped: a scene pad switches at once
+            click (sv.scenePad (4));
+            b2.clear(); proc.processBlock (b2, midi);
+            check (proc.playingScene() == 4, "sequencer: scene pad selects the scene");
+            click (sv.scenePad (0));
+            b2.clear(); proc.processBlock (b2, midi);
+            head2.playing = true;
+            // layout: rows stay inside the panel at 4 / 9 / 16 lanes, default and minimum window
+            int overflow = 0;
+            for (int lanesN : { 4, 9, 16 })
+            {
+                for (int s2 = proc.chainLength() - 1; s2 >= 0; --s2) proc.clearSlotCompact (s2);
+                for (int k = 0; k < lanesN; ++k) proc.appendEffect (idOf (k % 2 ? "Bitcrusher" : "Phaser"));
+                proc.reloadSlotsNow();
+                for (auto [w, h] : { std::pair<int, int> { 1180, 860 }, { 860, 640 } })
+                {
+                    grid->setSize (w, h); run (1);
+                    sv.refresh();
+                    // every row in view keeps its controls inside the row and the panel
+                    const auto lanesR = sv.lanesBounds();
+                    int visible = 0;
+                    for (int r = 0; r < lanesN; ++r)
+                    {
+                        const auto hb = sv.headerBounds (r);
+                        if (hb.getBottom() > lanesR.getBottom()) continue;
+                        ++visible;
+                        if (! hb.contains (sv.diceButton (r)) || ! hb.contains (sv.modeButton (r, 0)) || ! lanesR.contains (sv.cellBounds (r, 0))) ++overflow;
+                    }
+                    if (lanesN <= 9 && w == 1180 && visible < lanesN) ++overflow;   // up to 9 fit without scrolling
+                    if (visible < lanesN)
+                    {
+                        // scrolling brings the last lane into view
+                        juce::MouseWheelDetails wd {}; wd.deltaY = -10.0f;
+                        const auto pt = lanesR.getCentre().toFloat();
+                        juce::MouseEvent e (juce::Desktop::getInstance().getMainMouseSource(), pt, {}, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, &sv, &sv, juce::Time::getCurrentTime(), pt, juce::Time::getCurrentTime(), 1, false);
+                        sv.mouseWheelMove (e, wd);
+                        if (sv.headerBounds (lanesN - 1).getBottom() > lanesR.getBottom()) ++overflow;
+                        wd.deltaY = 10.0f; sv.mouseWheelMove (e, wd);
+                    }
+                    if (lanesN == 16)
+                        writePng (grid->createComponentSnapshot (grid->getLocalBounds(), false), dir.getChildFile ("shot_sequencer_16_" + juce::String (w) + ".png"));
+                }
+            }
+            check (overflow == 0, "sequencer: lanes fit / scroll at 1180x860 and 860x640 (4 / 9 / 16 lanes)");
+            grid->setSize (1180, 860);
+            grid->showSequencer (false);
+            proc.setPlayHead (nullptr);
+            proc.setSeqEnabled (false);
+            for (int s2 = proc.chainLength() - 1; s2 >= 0; --s2) proc.clearSlotCompact (s2);
+            proc.clearUndo();
+        }
+
         // minimum window: every effect's controls get >= 78 px and stay inside the panel
         grid->setSize (860, 640); run (4);
         int narrow = 0, worstId = 0, worstW = 9999;

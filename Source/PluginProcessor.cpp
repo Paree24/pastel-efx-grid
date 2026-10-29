@@ -1322,3 +1322,85 @@ void EfxGridProcessor::scheduleSequencer (double ppq, double bps, int n, bool ho
     seqPpqUi.store (ppq + bps * n, std::memory_order_relaxed);
     seqRunningUi.store (on && hostPlaying, std::memory_order_relaxed);
 }
+
+// ------------------------------------------------------------------ sequencer dice / mutate / scene tools
+static bool laneVisible (const efx::EffectDef* d) { return d != nullptr && d->cat != efx::CatAnalysis; }
+
+void EfxGridProcessor::diceLane (int slot, int scene)
+{
+    if (! laneVisible (efx::defForId (getSlotEffectId (slot)))) return;
+    UndoBatch batch (*this);
+    const auto ss = sceneSettings (scene);
+    const int len = laneLenA[slot][scene].load() > 0 ? laneLenA[slot][scene].load() : ss.steps;
+    uint32_t m = 0;
+    if (rng.nextFloat() < 0.35f)
+        m = seq::euclid (len, 1 + rng.nextInt (juce::jmax (1, len / 2)), rng.nextInt (len));
+    else
+    {
+        // steps on beats are likelier than off-beats, so results groove
+        const float density = 0.25f + 0.35f * rng.nextFloat();
+        for (int i = 0; i < len; ++i)
+        {
+            const float w = i % 4 == 0 ? 1.0f : (i % 2 == 0 ? 0.65f : 0.4f);
+            if (rng.nextFloat() < density * w * 1.4f) m |= 1u << (uint32_t) i;
+        }
+        if (m == 0) m = 1u;
+    }
+    laneStepsA[slot][scene].store (m);
+    laneModeA[slot].store (seq::Sequenced);
+    seqEdited();
+}
+
+void EfxGridProcessor::diceScene (int scene)
+{
+    UndoBatch batch (*this);
+    bool any = false;
+    for (int s = 0; s < chainLength(); ++s) any = any || laneModeA[s].load() == seq::Sequenced;
+    for (int s = 0; s < chainLength(); ++s)
+        if (laneVisible (efx::defForId (getSlotEffectId (s))) && (! any || laneModeA[s].load() == seq::Sequenced))
+            diceLane (s, scene);
+}
+
+void EfxGridProcessor::mutateScene (int scene, float amount)
+{
+    UndoBatch batch (*this);
+    const auto ss = sceneSettings (scene);
+    for (int s = 0; s < chainLength(); ++s)
+    {
+        if (laneModeA[s].load() != seq::Sequenced) continue;
+        const int len = laneLenA[s][scene].load() > 0 ? laneLenA[s][scene].load() : ss.steps;
+        uint32_t m = laneStepsA[s][scene].load();
+        const int flips = 1 + (int) (amount * (float) len * 0.25f * rng.nextFloat());
+        for (int f = 0; f < flips; ++f) m ^= 1u << (uint32_t) rng.nextInt (len);
+        laneStepsA[s][scene].store (m);
+    }
+    seqEdited();
+}
+
+void EfxGridProcessor::clearScene (int scene)
+{
+    UndoBatch batch (*this);
+    for (int s = 0; s < kSlots; ++s) { laneStepsA[s][scene].store (0u); laneLenA[s][scene].store (0); laneRateA[s][scene].store (-1); }
+    setSceneSettings (scene, seq::SceneSettings {});
+    seqEdited();
+}
+
+void EfxGridProcessor::copyScene (int from, int to)
+{
+    if (from == to || from < 0 || to < 0 || from >= seq::kScenes || to >= seq::kScenes) return;
+    UndoBatch batch (*this);
+    for (int s = 0; s < kSlots; ++s)
+    {
+        laneStepsA[s][to].store (laneStepsA[s][from].load());
+        laneLenA[s][to].store (laneLenA[s][from].load());
+        laneRateA[s][to].store (laneRateA[s][from].load());
+    }
+    setSceneSettings (to, sceneSettings (from));
+    seqEdited();
+}
+
+bool EfxGridProcessor::sceneHasSteps (int scene) const
+{
+    for (int s = 0; s < kSlots; ++s) if (laneStepsA[s][juce::jlimit (0, seq::kScenes - 1, scene)].load() != 0) return true;
+    return false;
+}

@@ -508,6 +508,12 @@ void GridTile::paint (juce::Graphics& g)
     {
         if (byp) st.accent = accent.withSaturation (0.1f).withAlpha (0.6f);
         viz::drawEffectVisual (g, L.viz, st);
+        // the sequencer has this slot off right now: the tile dims, so the grid still reads as a live chain
+        if (! byp && proc.seqRunning() && proc.getSlotLanes (index).mode == seq::Sequenced && ! proc.slotGateOpen (index))
+        {
+            g.setColour (juce::Colour (0x99141518));
+            g.fillRoundedRectangle (L.viz, 6.0f);
+        }
         if (byp)
         {
             g.setColour (juce::Colour (0xAA141518));
@@ -1098,7 +1104,7 @@ void ExpandedPanel::paint (juce::Graphics& g)
 // ============================================================
 // EfxGridEditor
 // ============================================================
-EfxGridEditor::EfxGridEditor (EfxGridProcessor& p) : juce::AudioProcessorEditor (p), undoSteps (p), proc (p), overlay (p), midiBtn (p.midiLearn), browser (p)
+EfxGridEditor::EfxGridEditor (EfxGridProcessor& p) : juce::AudioProcessorEditor (p), undoSteps (p), proc (p), overlay (p), midiBtn (p.midiLearn), browser (p), seqView (p)
 {
     lnf = std::make_unique<PastelLookAndFeel>();
     setLookAndFeel (lnf.get());
@@ -1145,6 +1151,14 @@ EfxGridEditor::EfxGridEditor (EfxGridProcessor& p) : juce::AudioProcessorEditor 
     mutAllBtn.setTooltip ("Nudge every effect's knobs a little from where they are");
     mutAllBtn.onClick = [this] { proc.mutateChain (0.3f); presetChanged(); };
     for (auto* b : { &presetPrev, &presetNext, &presetBtn, &randAllBtn, &mutAllBtn, static_cast<juce::TextButton*> (&midiBtn) }) { styleSmallButton (*b); addAndMakeVisible (*b); }
+    gridTab.setClickingTogglesState (false); seqTab.setClickingTogglesState (false);
+    gridTab.setConnectedEdges (juce::Button::ConnectedOnRight); seqTab.setConnectedEdges (juce::Button::ConnectedOnLeft);
+    gridTab.onClick = [this] { showSequencer (false); };
+    seqTab.onClick = [this] { showSequencer (true); };
+    gridTab.setTooltip ("The effect chain"); seqTab.setTooltip ("When each effect plays: a step sequencer synced to the host");
+    for (auto* b : { &gridTab, &seqTab }) { styleSmallButton (*b); addAndMakeVisible (*b); }
+    addChildComponent (seqView);
+    gridTab.setToggleState (true, juce::dontSendNotification);
     browser.onClose = [this] { browser.setVisible (false); grabKeyboardFocus(); };
     presetBtn.setButtonText (proc.presetName); shownPreset = proc.presetName;
     browser.onPresetChanged = [this] { presetChanged(); };
@@ -1200,6 +1214,7 @@ void EfxGridEditor::refreshFromModel()
 {
     for (int s = 0; s < EfxGridProcessor::kSlots; ++s) { shownFx[s] = proc.getSlotEffectId (s); tiles[(size_t) s]->refreshForEffect(); }
     if (shownLen != proc.chainLength()) layoutBoard();
+    if (showSeq) seqView.refresh();
     if (overlayOpen)
     {
         if (proc.getSlotEffectId (overlay.shownSlot()) == 0) closeOverlay();   // e.g. undo removed it
@@ -1268,14 +1283,20 @@ void EfxGridEditor::resized()
         mutAllBtn.setBounds (h.removeFromRight (78)); h.removeFromRight (6);
         randAllBtn.setBounds (h.removeFromRight (78)); h.removeFromRight (6);
         midiBtn.setBounds (h.removeFromRight (60));
-        // the centred preset bar narrows on small windows so it clears MIDI (right group: 308 px + 8 gap)
-        auto bar = headerArea.withSizeKeepingCentre (juce::jmin (320, headerArea.getWidth() - 632), 28);
+        // GRID | SEQUENCER after the title, the preset bar centred in what is left
+        auto tabs = juce::Rectangle<int> (200, h.getY(), juce::jmin (200, juce::jmax (140, h.getRight() - 200 - 300)), h.getHeight());
+        gridTab.setBounds (tabs.withWidth (tabs.getWidth() * 2 / 5));
+        seqTab.setBounds (tabs.withLeft (gridTab.getRight()));
+        const int barL = tabs.getRight() + 12, barR = midiBtn.getX() - 12;
+        auto bar = juce::Rectangle<int> (barL, h.getY(), juce::jmax (120, barR - barL), 28)
+                       .withSizeKeepingCentre (juce::jmin (320, juce::jmax (120, barR - barL)), 28);
         presetPrev.setBounds (bar.removeFromLeft (28)); bar.removeFromLeft (4);
         presetNext.setBounds (bar.removeFromRight (28)); bar.removeFromRight (4);
         presetBtn.setBounds (bar);
     }
     browser.setBounds (getLocalBounds());
     boardArea = area.reduced (18, 16);
+    seqView.setBounds (area.reduced (18, 12));
     layoutBoard();
     overlay.setBounds (getLocalBounds());
 }
@@ -1289,8 +1310,9 @@ void EfxGridEditor::layoutBoard()
     shownLen = n;
     const bool hasAdd = n < EfxGridProcessor::kSlots;
     addTile.empty = n == 0;
-    addTile.setVisible (hasAdd);
-    for (int s = 0; s < EfxGridProcessor::kSlots; ++s) tiles[(size_t) s]->setVisible (s < n);
+    addTile.setVisible (hasAdd && ! showSeq);
+    for (int s = 0; s < EfxGridProcessor::kSlots; ++s) tiles[(size_t) s]->setVisible (s < n && ! showSeq);
+    if (showSeq) return;   // the sequencer tab has the board
 
     if (n == 0)
     {
@@ -1347,7 +1369,8 @@ void EfxGridEditor::paint (juce::Graphics& g)
     }
 
     // signal-flow chevrons between neighbouring cells of a row, and a return
-    // arrow at the end of each full row
+    // arrow at the end of each full row (the grid tab only)
+    if (showSeq) return;
     const int n = proc.chainLength();
     std::vector<juce::Rectangle<int>> cells;
     for (int s = 0; s < n; ++s) cells.push_back (tiles[(size_t) s]->getBounds());
@@ -1393,4 +1416,16 @@ bool EfxGridEditor::keyPressed (const juce::KeyPress& k)
         return true;
     }
     return false;
+}
+
+void EfxGridEditor::showSequencer (bool on)
+{
+    showSeq = on;
+    gridTab.setToggleState (! on, juce::dontSendNotification);
+    seqTab.setToggleState (on, juce::dontSendNotification);
+    if (on && overlayOpen) closeOverlay();
+    seqView.setVisible (on);
+    if (on) { seqView.refresh(); seqView.toFront (false); }
+    layoutBoard();
+    repaint();
 }

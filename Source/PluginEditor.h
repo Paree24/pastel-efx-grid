@@ -9,6 +9,7 @@
 #include "Theme.h"
 #include "VizEditor.h"
 #include "PresetBrowser.h"
+#include "SeqView.h"
 
 class EfxGridEditor;
 
@@ -211,6 +212,14 @@ private:
     juce::Rectangle<int> headerArea, boardArea;
     // header: preset bar, randomize / mutate for the whole chain
     juce::TextButton presetPrev { "<" }, presetNext { ">" }, presetBtn, randAllBtn { "RANDOM" }, mutAllBtn { "MUTATE" };
+    // GRID | SEQUENCER: the sequencer tab takes the whole board
+    juce::TextButton gridTab { "GRID" }, seqTab { "SEQUENCER" };
+    SeqView seqView;
+    bool showSeq = false;
+public:
+    void showSequencer (bool on);
+    SeqView& sequencerView() { return seqView; }   // tests
+private:
     pastel::MidiLearnButton midiBtn;
     PresetBrowser browser;
     juce::String shownPreset;

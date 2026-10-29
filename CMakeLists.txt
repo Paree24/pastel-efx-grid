@@ -72,6 +72,7 @@ set(PASTEL_UI_SOURCES
     Source/VizEditor.cpp
     Source/Presets.cpp
     Source/PresetBrowser.cpp
+    Source/SeqView.cpp
     Source/Theme.cpp
     Source/MidiLearn.cpp
 )

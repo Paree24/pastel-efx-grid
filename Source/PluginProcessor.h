@@ -74,6 +74,13 @@ public:
     bool seqRunning() const { return seqRunningUi.load(); }
     void seqEdited();                          // dirty flag + state generation after a sequencer edit
     void setLivePad (int slot, bool down) { if (slot >= 0 && slot < kSlots) livePadUi[(size_t) slot].store (down); }
+    // dice and mutate (one undo step each); steps favour beats over off-beats
+    void diceLane (int slot, int scene);
+    void diceScene (int scene);
+    void mutateScene (int scene, float amount);
+    void clearScene (int scene);
+    void copyScene (int from, int to);
+    bool sceneHasSteps (int scene) const;
 
     // ---- undo / redo (message thread) ------------------------------------
     // Snapshots of every slot (knobs, mode, mix, routing, shape data, tables /
