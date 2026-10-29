@@ -74,6 +74,16 @@ public:
     bool seqRunning() const { return seqRunningUi.load(); }
     void seqEdited();                          // dirty flag + state generation after a sequencer edit
     void setLivePad (int slot, bool down) { if (slot >= 0 && slot < kSlots) livePadUi[(size_t) slot].store (down); }
+    // settings: MIDI note maps, gate fade, when a requested scene switches
+    enum SceneSwitch { SwitchPattern = 0, SwitchBeat = 1, SwitchNow = 2 };
+    int sceneNoteBase() const { return sceneNoteA.load(); }
+    int padNoteBase() const { return padNoteA.load(); }
+    int sceneSwitchMode() const { return switchModeA.load(); }
+    float gateFadeMs() const { return seqFadeMs.load(); }
+    void setSceneNoteBase (int note) { sceneNoteA.store (juce::jlimit (0, 127 - seq::kScenes, note)); seqEdited(); }
+    void setPadNoteBase (int note) { padNoteA.store (juce::jlimit (0, 127 - kSlots, note)); seqEdited(); }
+    void setSceneSwitchMode (int m) { switchModeA.store (juce::jlimit (0, 2, m)); seqEdited(); }
+    void setGateFadeMs (float ms) { seqFadeMs.store (juce::jlimit (1.0f, 10.0f, ms)); seqEdited(); }
     // dice and mutate (one undo step each); steps favour beats over off-beats
     void diceLane (int slot, int scene);
     void diceScene (int scene);
@@ -246,6 +256,7 @@ private:
     std::atomic<int> sceneStepsA[seq::kScenes] {}, sceneRateA[seq::kScenes] {};
     std::atomic<float> sceneSwingA[seq::kScenes] {};
     std::atomic<float> seqFadeMs { 3.0f };
+    std::atomic<int> sceneNoteA { 36 }, padNoteA { 60 }, switchModeA { 0 };
     std::atomic<int> seqPlaying { 0 }, seqQueued { -1 };
     std::array<std::atomic<bool>, kSlots> gateUi {}, livePadUi {};
     std::atomic<double> seqPpqUi { 0.0 };

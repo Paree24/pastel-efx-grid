@@ -916,6 +916,70 @@ int main (int argc, char** argv)
                 proc.undoStep();
                 check (proc.sceneSettings (3).steps == 16, "seq: undo restores scene settings");
             }
+            // MIDI: scene notes switch at the end of the pattern; live pads hold a lane open
+            {
+                auto block = [&] (std::initializer_list<juce::MidiMessage> msgs)
+                {
+                    juce::MidiBuffer mb2;
+                    for (auto& m : msgs) mb2.addEvent (m, 0);
+                    juce::AudioBuffer<float> b3 (2, 512); b3.clear();
+                    proc.processBlock (b3, mb2);
+                    head.ppq += 512.0 * head.bpm / (60.0 * 48000.0);
+                };
+                head.playing = true; head.ppq = 0.0;
+                proc.setLaneMode (0, seq::Sequenced);
+                for (int sc = 0; sc < 3; ++sc) proc.setLaneSteps (0, sc, 0u);
+                proc.setSceneSwitchMode (EfxGridProcessor::SwitchPattern);
+                head.playing = false; block ({}); proc.requestScene (0); block ({}); head.playing = true;
+                head.ppq = 1.0;
+                block ({ juce::MidiMessage::noteOn (1, 36 + 2, (juce::uint8) 100) });   // C1 + 2 = scene 3
+                check (proc.playingScene() == 0 && proc.queuedScene() == 2, "seq MIDI: scene note queues the scene");
+                while (head.ppq < 4.1) block ({});
+                check (proc.playingScene() == 2, "seq MIDI: ... switching at the end of the pattern");
+                block ({ juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100) });       // C3 = pad for slot 1
+                check (proc.slotGateOpen (0), "seq MIDI: a held live pad opens an empty sequenced lane");
+                block ({ juce::MidiMessage::noteOff (1, 60) });
+                block ({});
+                check (! proc.slotGateOpen (0), "seq MIDI: ... and closes it on release");
+                proc.setSceneSwitchMode (EfxGridProcessor::SwitchBeat);
+                head.ppq = 4.3;
+                block ({ juce::MidiMessage::noteOn (1, 36, (juce::uint8) 100) });
+                const bool waited = proc.playingScene() == 2;
+                while (head.ppq < 5.05) block ({});
+                check (waited && proc.playingScene() == 0, "seq MIDI: next-beat switching");
+                proc.setSceneSwitchMode (EfxGridProcessor::SwitchNow);
+                head.ppq = 5.3;
+                block ({ juce::MidiMessage::noteOn (1, 37, (juce::uint8) 100) });
+                check (proc.playingScene() == 1, "seq MIDI: immediate switching");
+                proc.setSceneNoteBase (48); proc.setPadNoteBase (72);
+                block ({ juce::MidiMessage::noteOn (1, 36 + 3, (juce::uint8) 100) });
+                block ({ juce::MidiMessage::noteOn (1, 48 + 3, (juce::uint8) 100) });
+                check (proc.playingScene() == 3, "seq MIDI: moved scene notes are used (old range ignored)");
+                // settings round trip
+                juce::MemoryBlock ms;
+                proc.getStateInformation (ms);
+                proc.setSceneNoteBase (36); proc.setPadNoteBase (60); proc.setSceneSwitchMode (0); proc.setGateFadeMs (3.0f);
+                proc.setGateFadeMs (7.0f);
+                juce::MemoryBlock ms2; proc.getStateInformation (ms2);
+                proc.setStateInformation (ms.getData(), (int) ms.getSize());
+                check (proc.sceneNoteBase() == 48 && proc.padNoteBase() == 72 && proc.sceneSwitchMode() == EfxGridProcessor::SwitchNow,
+                       "seq: MIDI note maps and switch mode are saved");
+                proc.setSceneNoteBase (36); proc.setPadNoteBase (60); proc.setSceneSwitchMode (0); proc.setGateFadeMs (3.0f);
+            }
+            // scene dice is one undo step and undo restores every lane exactly
+            {
+                proc.clearUndo();
+                std::vector<uint32_t> before;
+                for (int s2 = 0; s2 < proc.chainLength(); ++s2) { proc.setLaneMode (s2, seq::Sequenced); before.push_back (proc.laneSteps (s2, 4)); }
+                proc.undoCheckpoint();
+                proc.diceScene (4);
+                bool changed = false;
+                for (int s2 = 0; s2 < proc.chainLength(); ++s2) changed = changed || proc.laneSteps (s2, 4) != before[(size_t) s2];
+                proc.undoStep();
+                bool same = true;
+                for (int s2 = 0; s2 < proc.chainLength(); ++s2) same = same && proc.laneSteps (s2, 4) == before[(size_t) s2];
+                check (changed && same, "seq: scene dice changes lanes and one undo restores them");
+            }
             proc.setPlayHead (nullptr);
             proc.setSeqEnabled (false);
             for (int s2 = proc.chainLength() - 1; s2 >= 0; --s2) proc.clearSlotCompact (s2);

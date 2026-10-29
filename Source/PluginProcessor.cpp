@@ -663,6 +663,9 @@ void EfxGridProcessor::writeExtrasToState()
     }
     sq.setProperty ("scenes", scenes.joinIntoString (" "), nullptr);
     sq.setProperty ("fadeMs", seqFadeMs.load(), nullptr);
+    sq.setProperty ("sceneNotes", sceneNoteA.load(), nullptr);
+    sq.setProperty ("padNotes", padNoteA.load(), nullptr);
+    sq.setProperty ("switch", switchModeA.load(), nullptr);
     sq.setProperty ("playing", seqPlaying.load(), nullptr);
     extras.appendChild (sq, nullptr);
     state.appendChild (extras, nullptr);
@@ -698,6 +701,9 @@ void EfxGridProcessor::readExtrasFromState()
             setSceneSettings (sc, ss);
         }
         seqFadeMs.store (juce::jlimit (1.0f, 10.0f, (float) sq.getProperty ("fadeMs", 3.0f)));
+        sceneNoteA.store (juce::jlimit (0, 127 - seq::kScenes, (int) sq.getProperty ("sceneNotes", 36)));
+        padNoteA.store (juce::jlimit (0, 127 - kSlots, (int) sq.getProperty ("padNotes", 60)));
+        switchModeA.store (juce::jlimit (0, 2, (int) sq.getProperty ("switch", 0)));
         seqPlaying.store (juce::jlimit (0, seq::kScenes - 1, (int) sq.getProperty ("playing", 0)));
     }
     for (const auto& slot : extras)
@@ -1248,8 +1254,9 @@ void EfxGridProcessor::scheduleSequencer (double ppq, double bps, int n, bool ho
     {
         const auto msg = md.getMessage();
         const int note = msg.getNoteNumber();
-        if (msg.isNoteOn() && note >= 36 && note < 36 + seq::kScenes) sceneReq = note - 36;
-        if ((msg.isNoteOn() || msg.isNoteOff()) && note >= 60 && note < 60 + kSlots) livePad[note - 60] = msg.isNoteOn();
+        const int sb = sceneNoteA.load (std::memory_order_relaxed), pb = padNoteA.load (std::memory_order_relaxed);
+        if (msg.isNoteOn() && note >= sb && note < sb + seq::kScenes) sceneReq = note - sb;
+        if ((msg.isNoteOn() || msg.isNoteOff()) && note >= pb && note < pb + kSlots) livePad[note - pb] = msg.isNoteOn();
     }
     if (seqSceneParam != nullptr)
     {
@@ -1264,8 +1271,10 @@ void EfxGridProcessor::scheduleSequencer (double ppq, double bps, int n, bool ho
         else
         {
             const auto ss = sceneSettings (cur);
-            const double pattern = (double) ss.steps * seq::rateBeats (ss.rate);
-            const double boundary = std::ceil (ppq / pattern - 1.0e-9) * pattern;
+            const int mode = switchModeA.load (std::memory_order_relaxed);
+            // end of the playing pattern (default), the next beat, or now
+            const double pattern = mode == SwitchBeat ? 1.0 : (double) ss.steps * seq::rateBeats (ss.rate);
+            const double boundary = mode == SwitchNow ? ppq : std::ceil (ppq / pattern - 1.0e-9) * pattern;
             const int off = (int) std::ceil ((boundary - ppq) / bps - 1.0e-9);
             if (off < n) { switchAt = juce::jmax (0, off); next = sceneReq; sceneReq = -1; }
         }

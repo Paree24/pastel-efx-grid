@@ -53,7 +53,8 @@ private:
     EfxGridProcessor& proc;
     juce::ComboBox stepsBox, rateBox;
     juce::Slider swing;
-    juce::TextButton diceBtn { "DICE" }, mutBtn { "MUTATE" };
+    juce::TextButton diceBtn { "DICE" }, mutBtn { "MUTATE" }, setupBtn { "MIDI / FADE" };
+    void settingsMenu();
     std::vector<int> lanes;                 // slot per row
     juce::Rectangle<int> sceneBar, power, ruler, laneArea;
     int rowH = 64, scroll = 0, cellsX = 0, cellsW = 0;

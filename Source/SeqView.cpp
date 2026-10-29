@@ -65,8 +65,10 @@ SeqView::SeqView (EfxGridProcessor& p) : proc (p)
     stepsBox.setTooltip ("Steps in this scene's pattern (lanes can have their own: right-click a lane)");
     rateBox.setTooltip ("Step length");
     swing.setTooltip ("Delays every second step");
-    for (auto* c : std::initializer_list<juce::Component*> { &stepsBox, &rateBox, &swing, &diceBtn, &mutBtn }) addAndMakeVisible (c);
-    for (auto* b : { &diceBtn, &mutBtn })
+    setupBtn.setTooltip ("MIDI notes for scenes and live pads, gate fade, when scenes switch");
+    setupBtn.onClick = [this] { settingsMenu(); };
+    for (auto* c : std::initializer_list<juce::Component*> { &stepsBox, &rateBox, &swing, &diceBtn, &mutBtn, &setupBtn }) addAndMakeVisible (c);
+    for (auto* b : { &diceBtn, &mutBtn, &setupBtn })
     {
         b->setColour (juce::TextButton::textColourOffId, PastelColors::text);
         b->setColour (juce::TextButton::textColourOnId, PastelColors::barText);
@@ -129,7 +131,8 @@ void SeqView::resized()
         first.removeFromLeft (16 * 26);   // pads (painted)
         auto right = twoRows ? b : first;
         mutBtn.setBounds (right.removeFromRight (78)); right.removeFromRight (6);
-        diceBtn.setBounds (right.removeFromRight (66)); right.removeFromRight (16);
+        diceBtn.setBounds (right.removeFromRight (66)); right.removeFromRight (6);
+        setupBtn.setBounds (right.removeFromRight (96)); right.removeFromRight (16);
         const int w = right.getWidth();
         // Steps / Rate / Swing, labelled in paint
         auto s1 = right.removeFromLeft (juce::jmin (130, w / 3));
@@ -571,4 +574,31 @@ void SeqView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelD
     scroll -= (int) std::round (w.deltaY * 120.0f);
     layoutRows();
     repaint();
+}
+
+void SeqView::settingsMenu()
+{
+    static const char* const noteNames[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+    auto noteName = [] (int n) { return juce::String (noteNames[n % 12]) + juce::String (n / 12 - 2); };   // 36 = C1
+    juce::PopupMenu m, scenes, pads, fade, sw;
+    for (int base : { 0, 12, 24, 36, 48, 60, 72, 84, 96 })
+    {
+        scenes.addItem (1000 + base, noteName (base) + " - " + noteName (base + 15), true, proc.sceneNoteBase() == base);
+        pads.addItem (2000 + base, noteName (base) + " - " + noteName (base + 15), true, proc.padNoteBase() == base);
+    }
+    m.addSubMenu ("Scene notes", scenes);
+    m.addSubMenu ("Live pad notes (hold to open a lane)", pads);
+    for (int ms : { 1, 2, 3, 5, 10 }) fade.addItem (3000 + ms, juce::String (ms) + " ms", true, std::abs (proc.gateFadeMs() - (float) ms) < 0.01f);
+    m.addSubMenu ("Gate fade", fade);
+    sw.addItem (4000, "At the end of the pattern", true, proc.sceneSwitchMode() == EfxGridProcessor::SwitchPattern);
+    sw.addItem (4001, "On the next beat", true, proc.sceneSwitchMode() == EfxGridProcessor::SwitchBeat);
+    sw.addItem (4002, "Immediately", true, proc.sceneSwitchMode() == EfxGridProcessor::SwitchNow);
+    m.addSubMenu ("Switch scenes", sw);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&setupBtn), [this] (int r)
+    {
+        if (r >= 4000) proc.setSceneSwitchMode (r - 4000);
+        else if (r >= 3000) proc.setGateFadeMs ((float) (r - 3000));
+        else if (r >= 2000) proc.setPadNoteBase (r - 2000);
+        else if (r >= 1000) proc.setSceneNoteBase (r - 1000);
+    });
 }
