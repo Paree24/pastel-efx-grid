@@ -978,7 +978,7 @@ static int runSequencerTests()
                 && ca.bit (k + 4) == ca.bit (4) && cb.bit (k + 4) == cb.bit (4) && ca.bit (k + 5) == ca.bit (5) && cb.bit (k + 5) == cb.bit (5)) ++earlier;
         }
         expect ("seq: 5- and 16-step lanes repeat together after 80 steps", (float) mismatch, 0.0f, 0.01f);
-        expect ("seq: euclid(16, 5) has 5 pulses", (float) __builtin_popcount (seq::euclid (16, 5, 0)), 5.0f, 0.01f);
+        expect ("seq: euclid(16, 5) has 5 pulses", (float) juce::countNumberOfBits (seq::euclid (16, 5, 0)), 5.0f, 0.01f);
         juce::ignoreUnused (earlier);
     }
     // 5. GridEffect: Cut lane returns the input bit-exactly while off; Ring keeps a delay tail
