@@ -346,7 +346,7 @@ EFFECTS = [
         P("Human", "Pct", 0, 1, 0.3), P("Delay", "Ms", 0, 100, 15), P("Spread", "Pct", 0, 1, 0.6),
         P("Level", "Db", -24, 6, 0)],
        macro=("Harmony", {"Human": 1.0, "Spread": 1.0}), modes=["Diatonic", "Chromatic"], mix=0.5),
-    FX("Vocoder", "Pitch", "vocoder", "Channel vocoder; carrier is a saw, noise or the sidechain.",
+    FX("Vocoder", "Pitch", "vocoder", "Channel vocoder. Saw / Noise: the input is the voice. Ext: route a voice to the sidechain and the input (a synth) speaks it.",
        [C("Bands", ["8", "16", "24", "32"], 1), P("Pitch", "Note", 24, 72, 45, show=("mode", ["Saw"])),
         P("Formant", "Semis", -12, 12, 0), P("Attack", "Ms", 0.5, 50, 5), P("Release", "Ms", 5, 500, 60),
         P("Q", "Pct", 0, 1, 0.5), P("Sibilance", "Pct", 0, 1, 0.3)],

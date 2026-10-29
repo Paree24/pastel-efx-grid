@@ -617,6 +617,49 @@ static int runSignalTests()
         const auto oN = talk (saw, nullptr);
         float diff = 0.0f; for (size_t i = 0; i < N; ++i) diff = std::max (diff, std::abs (oN[i] - saw[i]));
         expect ("talkbox: no sidechain -> the input passes (max err)", diff, 0.0f, 1.0e-6f);
+
+        // ---- Vocoder, Ext: voice on the sidechain, the synth on the input
+        const int vid = idForName ("Vocoder");
+        const auto& vd = *defForId (vid);
+        auto voc = [&] (const std::vector<float>& carrier, const std::vector<float>* voice)
+        {
+            GridEffect fx (vid);
+            fx.prepare (kSr, 512);
+            Run r = defaults (vd);
+            std::vector<float> out (N), L (512), R (512), sl (512), sr2 (512);
+            for (size_t off = 0; off < N; off += 512)
+            {
+                const int n = (int) std::min<size_t> (512, N - off);
+                for (int i = 0; i < n; ++i)
+                {
+                    L[(size_t) i] = R[(size_t) i] = carrier[off + (size_t) i];
+                    sl[(size_t) i] = sr2[(size_t) i] = voice != nullptr ? (*voice)[off + (size_t) i] : 0.0f;
+                }
+                SlotInput si; si.norm = r.norm; si.macroDepth = r.depth; si.mix = 1.0f; si.bpm = 120.0; si.mode = 2;
+                if (voice != nullptr) { si.scL = sl.data(); si.scR = sr2.data(); }
+                fx.process (L.data(), R.data(), n, si);
+                for (int i = 0; i < n; ++i) out[off + (size_t) i] = L[(size_t) i];
+            }
+            return out;
+        };
+        const auto qA = voc (saw, &vA), qI = voc (saw, &vI);
+        // measured on the synth's own harmonics (220 Hz saw): F1 = 660 vs 220 Hz, F2 = 2200 Hz
+        auto h = [&] (const std::vector<float>& x, double f) { return toneDb (x, f, N / 2, N); };
+        const double f1A = h (qA, 660.0) - h (qA, 220.0), f1I = h (qI, 660.0) - h (qI, 220.0);
+        std::printf ("  vocoder ext: F1 contrast %.1f dB, F2 contrast %.1f dB\n", f1A - f1I, h (qI, 2200.0) - h (qA, 2200.0));
+        expect ("vocoder ext: /a/ vs /i/ on the sidechain move the synth's F1 harmonics (dB, >= 6)", (float) std::min (6.0, f1A - f1I), 6.0f, 0.01f);
+        expect ("vocoder ext: /i/ lifts the synth's 2.2 kHz harmonic over /a/ (dB, >= 6)", (float) std::min (6.0, h (qI, 2200.0) - h (qA, 2200.0)), 6.0f, 0.01f);
+        expect ("vocoder ext: the synth's pitch (220 Hz) comes through, not the voice's 120 Hz (dB, >= 20)",
+                (float) std::min (20.0, toneDb (qA, 660.0, N / 2, N) - toneDb (qA, 120.0, N / 2, N)), 20.0f, 0.01f);
+        float vpk = 0.0f;
+        { const auto qS = voc (saw, &silent); for (size_t i = N / 2; i < N; ++i) vpk = std::max (vpk, std::abs (qS[i])); }
+        expect ("vocoder ext: silent voice -> silent output (dBFS, <= -60)", std::max (-60.0f, gainToDb (vpk)), -60.0f, 0.01f);
+        const auto qN = voc (saw, nullptr);
+        float vdiff = 0.0f; for (size_t i = 0; i < N; ++i) vdiff = std::max (vdiff, std::abs (qN[i] - saw[i]));
+        expect ("vocoder ext: no sidechain -> the input passes (max err)", vdiff, 0.0f, 1.0e-6f);
+        float qpk = 0.0f; for (size_t i = N / 2; i < N; ++i) qpk = std::max (qpk, std::abs (qA[i]));
+        expect ("vocoder ext: output level is usable (peak dBFS, -24 .. 0)", juce::jlimit (-24.0f, 0.0f, gainToDb (qpk)), juce::jlimit (-24.0f, 0.0f, gainToDb (qpk)), 0.0f);
+        std::printf ("  vocoder ext peak %.1f dBFS\n", gainToDb (qpk));
     }
     // ---- Humanizer: per-step levels repeat with the bar, the average stays put
     {

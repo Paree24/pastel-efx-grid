@@ -33,8 +33,10 @@ carry the whole slot state (values, mode, mix, bypass, macro routing, wavetable)
   sliced into 2048-sample frames (the common multi-frame layout); short files are one cycle. The
   table is embedded in the session (up to 64 frames, 16-bit).
 - **Sidechain**: the plugin has an optional stereo sidechain bus. *Sidechain
-  Comp*, *Ducker* and *Vocoder* use it in their *Ext* mode (falling back to the
-  input when nothing is connected). The *Talkbox* needs it: put the voice on
+  Comp* and *Ducker* use it in their *Ext* mode (falling back to the input
+  when nothing is connected). The *Vocoder* in *Ext* mode takes the voice
+  from the sidechain and plays it through the input (a synth); in *Saw* and
+  *Noise* modes the input is the voice and an internal oscillator sings it. The *Talkbox* needs it: put the voice on
   the sidechain and the synth on the main input; the voice's mouth shape (an
   LPC vocal-tract filter, updated about every 5 ms) is imposed on the synth's
   notes. With no sidechain the input passes unchanged.

@@ -351,6 +351,11 @@ private:
 
 // ------------------------------------------------------------------ Vocoder
 // Bands, Pitch, Formant, Attack, Release, Q, Sibilance | Saw / Noise / Ext
+// Saw / Noise: the input is the voice (modulator), the internal oscillator
+// sings it. Ext: the sidechain is the voice and the input (a synth) is the
+// carrier; each carrier band is flattened by its own envelope first, so a
+// dark synth still carries every band of the words. No sidechain in Ext:
+// the input passes.
 class Vocoder : public FxImpl
 {
 public:
@@ -361,6 +366,8 @@ public:
     {
         for (auto& b : mod) b.reset(); for (auto& b : carL) b.reset(); for (auto& b : carR) b.reset();
         for (auto& e : env) e = 0.0f;
+        for (auto& e : carEnv) e = 0.0f;
+        carMean = 0.0f;
         ph1 = ph2 = 0.0; key = -1.0f; sibHp.reset();
     }
     static float polyBlep (double t, double dt)
@@ -395,12 +402,23 @@ public:
         const double f0 = midiToFreq (c.p[1]);
         const double dt1 = f0 / sr, dt2 = f0 * 1.006 / sr;
         const float norm = 2.5f / std::sqrt ((float) nb) * std::sqrt (c.p[5] * 2.0f + 0.6f);
+        const bool ext = c.mode == 2;
+        if (ext && (c.scL == nullptr || c.scR == nullptr))
+        {
+            for (int b = 0; b < juce::jmin (nb, VizTaps::kMeters); ++b) taps->set (b, 0.0f);
+            taps->set (VizTaps::kMeters - 1, (float) nb);
+            return;   // nothing to speak with: the input passes
+        }
+        if (ext)
+        {
+            processExt (L, R, n, c, nb, norm);
+            return;
+        }
         for (int i = 0; i < n; ++i)
         {
             const float m = 0.5f * (L[i] + R[i]);
             float cl, cr;
-            if (c.mode == 2 && c.scL != nullptr) { cl = c.scL[i]; cr = c.scR[i]; }
-            else if (c.mode == 1) { cl = rng.bipolar() * 0.7f; cr = rng.bipolar() * 0.7f; }
+            if (c.mode == 1) { cl = rng.bipolar() * 0.7f; cr = rng.bipolar() * 0.7f; }
             else
             {
                 ph1 += dt1; ph1 -= std::floor (ph1);
@@ -424,8 +442,41 @@ public:
         taps->set (VizTaps::kMeters - 1, (float) nb);
     }
 private:
+    // Ext: voice from the sidechain, carrier = the input
+    void processExt (float* L, float* R, int n, const FxContext& c, int nb, float norm)
+    {
+        const float atk = msCoef (c.p[3], sr), rel = msCoef (c.p[4], sr);
+        const float cAtk = msCoef (2.0f, sr), cRel = msCoef (40.0f, sr);
+        const float sib = c.p[6];
+        for (int i = 0; i < n; ++i)
+        {
+            const float m = 0.5f * (c.scL[i] + c.scR[i]);
+            const float cl = L[i], cr = R[i];
+            // a band with (almost) no carrier is not lifted out of the noise
+            const float floor = 1.0e-4f + 0.15f * carMean;
+            float ol = 0.0f, orr = 0.0f, sum = 0.0f;
+            for (int b = 0; b < nb; ++b)
+            {
+                const float a = std::abs (mod[b].process (m));
+                env[b] += (a > env[b] ? atk : rel) * (a - env[b]);
+                const float bl = carL[b].process (cl), br = carR[b].process (cr);
+                const float ca = juce::jmax (std::abs (bl), std::abs (br));
+                carEnv[b] += (ca > carEnv[b] ? cAtk : cRel) * (ca - carEnv[b]);
+                sum += carEnv[b];
+                const float g = env[b] / (carEnv[b] + floor);
+                ol += bl * g;
+                orr += br * g;
+            }
+            carMean = sum / (float) nb;
+            const float s = sibHp.process (m) * sib;
+            L[i] = ol * norm * 1.2f + s; R[i] = orr * norm * 1.2f + s;
+        }
+        for (int b = 0; b < juce::jmin (nb, VizTaps::kMeters); ++b) taps->set (b, clamp01 (env[b] * 6.0f));
+        taps->set (VizTaps::kMeters - 1, (float) nb);
+    }
+
     Biquad mod[kMax], carL[kMax], carR[kMax], sibHp;
-    float env[kMax] {};
+    float env[kMax] {}, carEnv[kMax] {}, carMean = 0.0f;
     double ph1 = 0.0, ph2 = 0.0;
     float key = -1.0f;
     Rng rng;

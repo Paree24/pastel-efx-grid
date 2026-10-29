@@ -1301,7 +1301,7 @@ extern const EffectDef kEffects[] = {
       8, M_49, 2, 0.500000f,
       { 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.700000f, 0.000000f, 0.400000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f } },
     { "Vocoder", CatPitch, VizVocoder,
-      "Channel vocoder; carrier is a saw, noise or the sidechain.", "Robot",
+      "Channel vocoder. Saw / Noise: the input is the voice. Ext: route a voice to the sidechain and the input (a synth) speaks it.", "Robot",
       { { "Bands", K::Choice, 0.0f, 3.000000f, 0.333333f, "", CH_50_0, 4, -2, 0xffffffffu },
         { "Pitch", K::Note, 24.000000f, 72.000000f, 0.437500f, "", nullptr, 0, -1, 0x1u },
         { "Formant", K::Semis, -12.000000f, 12.000000f, 0.500000f, "", nullptr, 0, -2, 0xffffffffu },
