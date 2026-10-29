@@ -530,7 +530,8 @@ EFFECTS = [
        [C("Stop", OFFON, 0), P("Speed", "Pct", 0, 1, 1), P("Stop Time", "Ms", 50, 4000, 800),
         P("Start Time", "Ms", 10, 4000, 300), P("Curve", "BiPct", -1, 1, 0.3),
         C("Div", ["1/2", "1/1", "2 bars", "4 bars"], 1, show=("mode", ["Loop"])),
-        P("Darken", "Pct", 0, 1, 0.5), P("Wow", "Pct", 0, 1, 0)],
+        P("Darken", "Pct", 0, 1, 0.5), P("Wow", "Pct", 0, 1, 0),
+        C("Fit", OFFON, 0)],   # sequenced: the stop takes exactly the lane's run
        macro=("Brake", {"Speed": 0.0}), modes=["Manual", "Loop"]),
     FX("Stutter", "Time", "stutter", "Tempo-locked buffer repeats.",
        [C("Div", DIVS, 10), P("Chance", "Pct", 0, 1, 0.5), P("Repeats", "Int", 1, 16, 4),

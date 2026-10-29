@@ -123,8 +123,7 @@ bool displayOnly (const EffectDef& d, int k)
 bool coveredElsewhere (const EffectDef& d, int k)
 {
     const juce::String n (d.name), p (d.p[k].name);
-    juce::ignoreUnused (n, p);
-    return false;
+    return n == "Tape Stop" && p == "Fit";   // only acts on a sequencer run: see "seq: tape stop Fit"
 
 }
 
@@ -970,6 +969,91 @@ static int runSequencerTests()
             worst = std::max (worst, maxOut - std::max (maxIn, maxRef));
         }
         expect ("seq: gate edges add no clicks (excess step, <= 0.01)", std::max (0.01f, worst), 0.01f, 0.001f);
+    }
+    // 6. triggered time effects: known answers
+    {
+        struct Trig { int at; bool on; double run, phase; };
+        // run an effect with gate events; returns the output and the meter 0 at `probeAt`
+        auto runTrig = [&] (const char* name, std::vector<std::pair<const char*, float>> set, const std::vector<float>& in,
+                            std::vector<Trig> evs, int probeAt, float& probe)
+        {
+            const int id = idForName (name);
+            const auto& d = *defForId (id);
+            GridEffect fx (id);
+            fx.prepare (kSr, 512);
+            Run r = defaults (d);
+            r.mix = 1.0f;
+            for (auto& [nm, v] : set) for (int k = 0; k < d.numParams; ++k) if (juce::String (d.p[k].name) == nm) r.norm[k] = mapParam (d.p[k], v);
+            std::vector<float> out (in.size()), L (256), R (256);
+            size_t e = 0;
+            probe = 0.0f;
+            for (size_t off = 0; off < in.size(); off += 256)
+            {
+                const int n = (int) std::min<size_t> (256, in.size() - off);
+                for (int i = 0; i < n; ++i) L[(size_t) i] = R[(size_t) i] = in[off + (size_t) i];
+                SlotInput::GateEvent ev[8]; int cnt = 0;
+                while (e < evs.size() && evs[e].at < (int) (off + (size_t) n))
+                {
+                    ev[cnt].offset = evs[e].at - (int) off; ev[cnt].on = evs[e].on; ev[cnt].runBeats = evs[e].run; ev[cnt].phaseBeats = evs[e].phase; ++cnt; ++e;
+                }
+                SlotInput si; si.norm = r.norm; si.macroDepth = r.depth; si.mix = 1.0f; si.bpm = 120.0; si.ppq = (double) off / kSr * 2.0; si.playing = true;
+                si.gateEvents = ev; si.numGateEvents = cnt; si.gateFadeMs = 1.0f;
+                fx.process (L.data(), R.data(), n, si);
+                for (int i = 0; i < n; ++i) out[off + (size_t) i] = L[(size_t) i];
+                if ((int) off <= probeAt && probeAt < (int) off + n) probe = fx.taps().get (0);
+            }
+            return out;
+        };
+        const size_t N = (size_t) kSr * 4;
+        std::vector<float> noise (N);
+        juce::Random rnd (11);
+        for (auto& v : noise) v = (rnd.nextFloat() * 2.0f - 1.0f) * 0.3f;
+        float probe = 0.0f;
+        const int t0 = (int) kSr;   // beat 2 at 120 bpm
+        // Stutter: run of 2 beats at Div 1/16 (6000 samples): the second Div repeats the first exactly
+        {
+            const auto out = runTrig ("Stutter", { { "Div", 10.0f }, { "Chance", 0.0f }, { "Repeats", 16.0f }, { "Fade", 0.1f } }, noise,
+                                      { { 0, false, 0, 0 }, { t0, true, 2.0, 0.0 } }, 0, probe);
+            double err = 0.0;
+            for (int k = 200; k < 5800; ++k) err = std::max (err, (double) std::abs (out[(size_t) (t0 + 6000 + k)] - noise[(size_t) (t0 + k)]));
+            expect ("seq: stutter repeats the captured Div exactly (max err)", (float) err, 0.0f, 1.0e-5f);
+        }
+        // Reverse (free): run of 0.5 beats (0.25 s): plays the audio just before the run backwards
+        {
+            const auto out = runTrig ("Reverse", { { "Sync", 0.0f }, { "Fade", 0.01f }, { "Feedback", 0.0f }, { "Width", 0.0f } }, noise,
+                                      { { 0, false, 0, 0 }, { t0, true, 0.5, 0.0 } }, 0, probe);
+            double err = 0.0;
+            const int len = (int) (0.25 * kSr);
+            for (int k = len / 50; k < len - len / 50; ++k) err = std::max (err, (double) std::abs (out[(size_t) (t0 + k)] - noise[(size_t) (t0 - 1 - k)]));
+            expect ("seq: reverse plays the run's past backwards (max err)", (float) err, 0.0f, 1.0e-4f);
+        }
+        // Tape Stop with Fit: stopped by the end of a 1-beat run; without Fit (800 ms) still fast
+        {
+            const int endAt = t0 + (int) (0.47 * kSr);
+            float rateFit = 1.0f, rateNo = 0.0f;
+            runTrig ("Tape Stop", { { "Fit", 1.0f }, { "Curve", 0.0f } }, noise, { { 0, false, 0, 0 }, { t0, true, 1.0, 0.0 } }, endAt, rateFit);
+            runTrig ("Tape Stop", { { "Fit", 0.0f }, { "Curve", 0.0f } }, noise, { { 0, false, 0, 0 }, { t0, true, 1.0, 0.0 } }, endAt, rateNo);
+            expect ("seq: tape stop Fit: nearly stopped at the run's end (rate, <= 0.1)", std::max (0.1f, rateFit), 0.1f, 0.001f);
+            expect ("seq: ... without Fit still running (rate, >= 0.3)", std::min (0.3f, rateNo), 0.3f, 0.001f);
+        }
+        // Buffer Shuffler: the same run twice (identical input around it) shuffles identically
+        {
+            std::vector<float> tone (N);
+            for (size_t i = 0; i < N; ++i) tone[i] = (float) (0.3 * sine (220.0, i) + 0.1 * sine (1650.0, i));   // repeats every 1 s exactly
+            const int t1 = t0 + (int) (2 * kSr);
+            const auto out = runTrig ("Buffer Shuffler", { { "Chance", 1.0f }, { "Range", 0.0f } }, tone,
+                                      { { 0, false, 0, 0 }, { t0, true, 1.0, 0.0 }, { t0 + (int) (0.5 * kSr), false, 0, 0 },
+                                        { t1, true, 1.0, 0.0 }, { t1 + (int) (0.5 * kSr), false, 0, 0 } }, 0, probe);
+            double err = 0.0;
+            for (int k = (int) (0.01 * kSr); k < (int) (0.45 * kSr); ++k) err = std::max (err, (double) std::abs (out[(size_t) (t0 + k)] - out[(size_t) (t1 + k)]));   // (after the 3 ms entry crossfade)
+            expect ("seq: shuffler repeats the same shuffle each run (max err)", (float) err, 0.0f, 1.0e-4f);
+        }
+        // Time Stretch: its loop restarts at the run (cycle position ~0 right after)
+        {
+            const int tMid = (int) (2.3 * 0.5 * kSr);   // beat 2.3, mid-cycle
+            runTrig ("Time Stretch", {}, noise, { { 0, false, 0, 0 }, { tMid, true, 4.0, 0.0 } }, tMid + 300, probe);
+            expect ("seq: time stretch restarts its loop at the run (cycle pos, <= 0.02)", std::max (0.02f, probe), 0.02f, 0.001f);
+        }
     }
     return checkFails - before;
 }

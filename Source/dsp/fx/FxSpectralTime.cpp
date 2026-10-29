@@ -292,9 +292,17 @@ class TimeStretch : public FxImpl
 {
 public:
     void prepare (double s) override { hist.prepare (s, 17.0f); reset(); }
-    void reset() override { hist.reset(); cycle = -1; cycleStart = 0; tl.reset(); tr.reset(); }
+    void reset() override { hist.reset(); cycle = -1; cycleStart = 0; tl.reset(); tr.reset(); beatOffset = 0.0; pending = false; }
+    // sequencer: the loop restarts where the run starts
+    void trigger (double, double phaseBeats, double) override { pending = true; pendingPhase = phaseBeats; }
     void process (float* L, float* R, int n, const FxContext& c) override
     {
+        if (pending)
+        {
+            pending = false;
+            beatOffset = c.ppq - pendingPhase;
+            cycle = -1;   // the next sample starts a cycle at the run's start
+        }
         const double pitch = semisToRatio (c.p[4]);
         tl.setCutoff (c.p[5], sr); tr.setCutoff (c.p[5], sr);
         const bool tone = c.p[5] < 19000.0f;
@@ -309,9 +317,14 @@ public:
         for (int i = 0; i < n; ++i)
         {
             hist.write (L[i], R[i]);
-            const double beat = c.ppq + c.beatsPerSample * i;
+            const double beat = c.ppq + c.beatsPerSample * i - beatOffset;
             const long long cyc = (long long) std::floor (beat / lenB);
-            if (cyc != cycle) { cycle = cyc; cycleStart = hist.w - 1; }
+            if (cyc != cycle)
+            {
+                cycle = cyc;
+                // (entering a run late: the cycle began phase samples ago)
+                cycleStart = hist.w - 1 - (long long) std::floor (juce::jmax (0.0, beat - (double) cyc * lenB) / juce::jmax (1.0e-9, c.beatsPerSample));
+            }
             const double t = (double) (hist.w - 1 - cycleStart);        // samples since the cycle began
             const double cycleLen = c.samplesFor (lenB);
             frac = t / juce::jmax (1.0, cycleLen);
@@ -342,6 +355,8 @@ private:
     History hist;
     long long cycle = -1, cycleStart = 0;
     OnePole tl, tr;
+    double beatOffset = 0.0, pendingPhase = 0.0;
+    bool pending = false;
 };
 
 // ------------------------------------------------------------------ Reverse
@@ -350,16 +365,35 @@ class Reverse : public FxImpl
 {
 public:
     void prepare (double s) override { hist.prepare (s, 9.0f); reset(); }
-    void reset() override { hist.reset(); seg = -1; segStart = 0; prevStart = 0; segLen = 1; free = 0.0; fbl = fbr = 0.0f; tl.reset(); tr.reset(); }
+    void reset() override { hist.reset(); seg = -1; segStart = 0; prevStart = 0; segLen = 1; free = 0.0; fbl = fbr = 0.0f; tl.reset(); tr.reset(); beatOffset = 0.0; pending = false; trigLen = 0.0; }
+    // sequencer: play the audio just before the run backwards, for the run (or per Div with Sync)
+    void trigger (double runBeats, double phaseBeats, double) override { pending = true; pendingRun = runBeats; pendingPhase = phaseBeats; }
     void process (float* L, float* R, int n, const FxContext& c) override
     {
+        if (pending)
+        {
+            pending = false;
+            const double spb = 1.0 / juce::jmax (1.0e-12, c.beatsPerSample);
+            const double phaseS = pendingPhase * spb;
+            const bool syncNow = on (c, 0);
+            const double divS = c.samplesFor (divBeatsOf (*def, c.p, 2));
+            const double runS = pendingRun > 1.0e6 ? (syncNow ? divS : c.p[1] * 0.001 * sr) : pendingRun * spb;
+            trigLen = syncNow ? 0.0 : juce::jlimit (64.0, (double) hist.size - 2.0, runS);
+            beatOffset = c.ppq - pendingPhase;
+            const double segS = syncNow ? divS : trigLen;
+            segStart = hist.w - (long long) phaseS;   // hist.w: the run's first sample, not written yet
+            prevStart = segStart - (long long) juce::jlimit (64.0, (double) hist.size * 0.45, segS);
+            segLen = std::max<long long> (64, segStart - prevStart);
+            seg = syncNow ? (long long) std::floor ((c.ppq - beatOffset) / divBeatsOf (*def, c.p, 2)) : 0;
+            free = phaseS;
+        }
         const double speed = c.p[5];
         const double widthS = c.p[7] * 0.02 * sr;   // the right side reads a little later
         tl.setCutoff (c.p[6], sr); tr.setCutoff (c.p[6], sr);
         const bool tone = c.p[6] < 19000.0f;
         const bool sync = on (c, 0);
         const double beats = divBeatsOf (*def, c.p, 2);
-        const double lenS = sync ? c.samplesFor (beats) : c.p[1] * 0.001 * sr;
+        const double lenS = sync ? c.samplesFor (beats) : (trigLen > 0.0 ? trigLen : c.p[1] * 0.001 * sr);
         const float fade = c.p[3], fb = c.p[4];
         const bool alt = c.mode == 1;
         float pos01 = 0.0f;
@@ -367,7 +401,7 @@ public:
         {
             hist.write (L[i] + loopSat (fbl * fb), R[i] + loopSat (fbr * fb));
             long long s;
-            if (sync) { const double beat = c.ppq + c.beatsPerSample * i; s = (long long) std::floor (beat / beats); }
+            if (sync) { const double beat = c.ppq + c.beatsPerSample * i - beatOffset; s = (long long) std::floor (beat / beats); }
             else { free += 1.0; s = (long long) std::floor (free / juce::jmax (64.0, lenS)); }
             if (s != seg)
             {
@@ -395,6 +429,8 @@ private:
     double free = 0.0;
     float fbl = 0.0f, fbr = 0.0f;
     OnePole tl, tr;
+    double beatOffset = 0.0, pendingRun = 0.0, pendingPhase = 0.0, trigLen = 0.0;
+    bool pending = false;
 };
 
 // ------------------------------------------------------------------ Tape stop
@@ -403,10 +439,26 @@ class TapeStop : public FxImpl
 {
 public:
     void prepare (double s) override { hist.prepare (s, 12.0f); reset(); }
-    void reset() override { hist.reset(); v = 1.0f; readPos = 0.0; xfade = 0.0f; xfFrom = 0.0; tl.reset(); tr.reset(); wow.reset(); }
+    void reset() override { hist.reset(); v = 1.0f; readPos = 0.0; xfade = 0.0f; xfFrom = 0.0; tl.reset(); tr.reset(); wow.reset(); runLeft = 0.0; pending = false; }
+    // sequencer: brake across the run (Fit: the stop takes exactly the run)
+    void trigger (double runBeats, double phaseBeats, double) override { pending = true; pendingRun = runBeats; pendingPhase = phaseBeats; }
     void process (float* L, float* R, int n, const FxContext& c) override
     {
-        bool stop = on (c, 0);
+        const bool fit = on (c, 8);
+        if (pending)
+        {
+            pending = false;
+            const double spb = 1.0 / juce::jmax (1.0e-12, c.beatsPerSample);
+            runLeft = pendingRun > 1.0e6 ? 1.0e12 : (pendingRun - pendingPhase) * spb;
+            runTotal = pendingRun > 1.0e6 ? (double) c.p[2] * 0.001 * sr : pendingRun * spb;
+            // a jump into the middle of a run resumes partway down the curve
+            const double stopS = fit ? runTotal : (double) c.p[2] * 0.001 * sr;
+            v = (float) juce::jlimit (0.0, 1.0, 1.0 - pendingPhase * spb / juce::jmax (1.0, stopS));
+            if (pendingPhase <= 0.0) v = juce::jmax (v, c.p[1]);
+        }
+        const bool triggered = runLeft > 0.0;
+        if (triggered) runLeft -= n;
+        bool stop = on (c, 0) || triggered;
         if (c.mode == 1)
         {
             const double beats = divBeatsOf (*def, c.p, 5);
@@ -414,7 +466,7 @@ public:
             stop = stop || ph >= 0.5;
         }
         const float target = stop ? 0.0f : c.p[1];
-        const float down = 1.0f / (juce::jmax (1.0f, c.p[2] * 0.001f * (float) sr));
+        const float down = 1.0f / (juce::jmax (1.0f, (triggered && fit) ? (float) runTotal : c.p[2] * 0.001f * (float) sr));
         const float up = 1.0f / (juce::jmax (1.0f, c.p[3] * 0.001f * (float) sr));
         const float expo = std::pow (2.0f, c.p[4] * 2.0f);
         const double maxLag = (double) hist.size - sr * 1.0;
@@ -460,6 +512,8 @@ private:
     double readPos = 0.0, xfFrom = 0.0;
     OnePole tl, tr;
     Lfo wow;
+    double runLeft = 0.0, runTotal = 1.0, pendingRun = 0.0, pendingPhase = 0.0;
+    bool pending = false;
 };
 
 // ------------------------------------------------------------------ Stutter
@@ -468,10 +522,27 @@ class Stutter : public FxImpl
 {
 public:
     void prepare (double s) override { hist.prepare (s, 8.0f); rng.seed (41); reset(); }
-    void reset() override { hist.reset(); step = -1; active = false; rep = 0; evStart = 0; stepStart = 0; fl.reset(); fr.reset(); reversed = false; }
+    void reset() override { hist.reset(); step = -1; active = false; rep = 0; evStart = 0; stepStart = 0; fl.reset(); fr.reset(); reversed = false; beatOffset = 0.0; pending = false; runLeft = 0.0; }
+    // sequencer: capture one Div where the run starts and repeat it until the run ends
+    void trigger (double runBeats, double phaseBeats, double) override { pending = true; pendingRun = runBeats; pendingPhase = phaseBeats; }
     void process (float* L, float* R, int n, const FxContext& c) override
     {
         const double beats = divBeatsOf (*def, c.p, 0);
+        if (pending)
+        {
+            pending = false;
+            const double spb = 1.0 / juce::jmax (1.0e-12, c.beatsPerSample);
+            beatOffset = c.ppq - pendingPhase;
+            const long long into = (long long) std::floor (pendingPhase / beats);
+            step = into;
+            stepStart = hist.w - (long long) ((pendingPhase - (double) into * beats) * spb);   // hist.w: the run's first sample
+            evStart = hist.w - (long long) (pendingPhase * spb);
+            active = true; rep = (int) into; reversed = rng.uni() < c.p[8];
+            runLeft = pendingRun > 1.0e6 ? 1.0e12 : (pendingRun - pendingPhase) * spb;
+        }
+        const bool triggered = runLeft > 0.0;
+        bool runEnds = false;
+        if (triggered) { runLeft -= n; runEnds = runLeft <= 0.0; }
         const int repeats = juce::jmax (1, ci (c, 2));
         const float decayDb = c.p[7], filt = c.p[9];
         const float gate = c.p[3], pitch = c.p[4];
@@ -482,14 +553,15 @@ public:
         for (int i = 0; i < n; ++i)
         {
             hist.write (L[i], R[i]);
-            const double beat = c.ppq + c.beatsPerSample * i;
+            const double beat = c.ppq + c.beatsPerSample * i - beatOffset;
             const long long s = (long long) std::floor (beat / beats);
             if (s != step)
             {
                 step = s; stepStart = hist.w - 1;
                 if (active) ++rep;
-                if (active && rep >= repeats && ! hold) active = false;
-                if (! active && (hold || rng.uni() < c.p[1])) { active = true; rep = 0; evStart = stepStart; reversed = rng.uni() < c.p[8]; }
+                // while a sequencer run lasts the captured Div keeps repeating
+                if (active && rep >= repeats && ! hold && ! triggered) active = false;
+                if (! active && ! triggered && (hold || rng.uni() < c.p[1])) { active = true; rep = 0; evStart = stepStart; reversed = rng.uni() < c.p[8]; }
                 // each repeat: quieter, and filtered further (low-pass when Filter < 0, high-pass when > 0)
                 const float sweep = clamp01 (std::abs (filt) * (float) rep / (float) juce::jmax (1, repeats - 1));
                 const float fc = filt < 0.0f ? 20000.0f * std::pow (0.02f, sweep) : 20.0f * std::pow (400.0f, sweep);
@@ -520,6 +592,7 @@ public:
             }
             L[i] = a; R[i] = b;
         }
+        if (runEnds) { runLeft = 0.0; active = false; }   // the run is over
         taps->set (0, ramp); taps->set (1, active ? (float) (rep + 1) : 0.0f);
     }
 private:
@@ -529,6 +602,8 @@ private:
     int rep = 0;
     bool active = false, reversed = false;
     OnePole fl, fr;
+    double beatOffset = 0.0, pendingRun = 0.0, pendingPhase = 0.0, runLeft = 0.0;
+    bool pending = false;
 };
 
 // ------------------------------------------------------------------ Buffer shuffler
@@ -537,10 +612,21 @@ class Shuffler : public FxImpl
 {
 public:
     void prepare (double s) override { hist.prepare (s, 17.0f); rng.seed (51); reset(); }
-    void reset() override { hist.reset(); step = -1; src = prevSrc = 0.0; back = prevBack = false; live = prevLive = true; stepStart = 0; kind = 0; }
+    void reset() override { hist.reset(); step = -1; src = prevSrc = 0.0; back = prevBack = false; live = prevLive = true; stepStart = 0; kind = 0; beatOffset = 0.0; pending = false; }
+    // sequencer: the slice order restarts with each run, so a run shuffles the same way every pass
+    void trigger (double, double phaseBeats, double) override { pending = true; pendingPhase = phaseBeats; }
     void process (float* L, float* R, int n, const FxContext& c) override
     {
         const double beats = divBeatsOf (*def, c.p, 0);
+        if (pending)
+        {
+            pending = false;
+            rng.seed (51);
+            beatOffset = c.ppq - pendingPhase;
+            step = -1;
+            // a clean start, so every run makes the same choices
+            src = prevSrc = 0.0; back = prevBack = false; live = prevLive = true; kind = 0; rate = 1.0;
+        }
         static constexpr double kRange[3] = { 2.0, 4.0, 8.0 };
         const double rangeB = kRange[juce::jlimit (0, 2, ci (c, 2))];
         const double stepLen = c.samplesFor (beats);
@@ -548,7 +634,7 @@ public:
         for (int i = 0; i < n; ++i)
         {
             hist.write (L[i], R[i]);
-            const double beat = c.ppq + c.beatsPerSample * i;
+            const double beat = c.ppq + c.beatsPerSample * i - beatOffset;
             const long long s = (long long) std::floor (beat / beats);
             if (s != step)
             {
@@ -605,6 +691,8 @@ private:
     bool back = false, prevBack = false, live = true, prevLive = true;
     int kind = 0;
     double rate = 1.0;
+    double beatOffset = 0.0, pendingPhase = 0.0;
+    bool pending = false;
 };
 
 // ------------------------------------------------------------------ Slicer (euclidean)

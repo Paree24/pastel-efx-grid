@@ -161,6 +161,7 @@ static const char* const CH_83_2[] = { "1/1", "1/2", "1/2D", "1/2T", "1/4", "1/4
 static const char* const M_84[] = { "Manual", "Loop" };
 static const char* const CH_84_0[] = { "Off", "On" };
 static const char* const CH_84_5[] = { "1/2", "1/1", "2 bars", "4 bars" };
+static const char* const CH_84_8[] = { "Off", "On" };
 static const char* const CH_85_0[] = { "1/1", "1/2", "1/2D", "1/2T", "1/4", "1/4D", "1/4T", "1/8", "1/8D", "1/8T", "1/16", "1/16D", "1/16T", "1/32", "1/64" };
 static const char* const CH_85_6[] = { "Off", "On" };
 static const char* const CH_86_0[] = { "1/1", "1/2", "1/2D", "1/2T", "1/4", "1/4D", "1/4T", "1/8", "1/8D", "1/8T", "1/16", "1/16D", "1/16T", "1/32", "1/64" };
@@ -1985,7 +1986,7 @@ extern const EffectDef kEffects[] = {
         { "Div", K::Choice, 0.0f, 3.000000f, 0.333333f, "", CH_84_5, 4, -1, 0x2u },
         { "Darken", K::Pct, 0.000000f, 1.000000f, 0.500000f, "", nullptr, 0, -2, 0xffffffffu },
         { "Wow", K::Pct, 0.000000f, 1.000000f, 0.000000f, "", nullptr, 0, -2, 0xffffffffu },
-        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
+        { "Fit", K::Choice, 0.0f, 1.000000f, 0.000000f, "", CH_84_8, 2, -2, 0xffffffffu },
         { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
         { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
         { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
@@ -1993,7 +1994,7 @@ extern const EffectDef kEffects[] = {
         { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
         { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
         { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu } },
-      8, M_84, 2, 1.000000f,
+      9, M_84, 2, 1.000000f,
       { 0.000000f, -1.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f } },
     { "Stutter", CatTime, VizStutter,
       "Tempo-locked buffer repeats.", "Chop",
