@@ -225,9 +225,21 @@ void GridEffect::process (float* L, float* R, int n, const SlotInput& in)
 
     const double beatsPerSample = in.bpm / (60.0 * sr);
 
+    // effect sequencer events: a gate change starts a raised-cosine ramp
+    const int gateFade = juce::jmax (1, (int) std::lround (juce::jlimit (1.0f, 10.0f, in.gateFadeMs) * 0.001f * (float) sr));
+    int nextEvent = 0;
+    auto applyEvent = [&] (const SlotInput::GateEvent& e, bool callTrigger)
+    {
+        gateFrom = gateS;
+        gateTo = e.on ? 1.0f : 0.0f;
+        gatePos = 0; gateLen = gateFade;
+        if (e.on && callTrigger && e.runBeats > 0.0) impl->trigger (e.runBeats, e.phaseBeats, in.bpm);   // runs and pads, not mode switches
+    };
+
     // fully bypassed: audio passes untouched, the effect sleeps (tails stop)
     if (in.bypass && activeS <= 0.0f)
     {
+        for (int i = 0; i < in.numGateEvents; ++i) { gateTo = in.gateEvents[i].on ? 1.0f : 0.0f; gateS = gateFrom = gateTo; gatePos = gateLen = 0; }
         freePpq += beatsPerSample * n;
         pushScope (L, R, n, L, R);
         return;
@@ -245,9 +257,25 @@ void GridEffect::process (float* L, float* R, int n, const SlotInput& in)
     ctx.data = data;
     ctx.dataGen = in.dataGen;
 
-    for (int off = 0; off < n; off += kChunk)
+    for (int off = 0; off < n;)
     {
-        const int m = juce::jmin (kChunk, n - off);
+        // events at this sample, then a chunk that ends at the next one
+        while (nextEvent < in.numGateEvents && in.gateEvents[nextEvent].offset <= off)
+            applyEvent (in.gateEvents[nextEvent++], true);
+        int m = juce::jmin (kChunk, n - off);
+        if (nextEvent < in.numGateEvents) m = juce::jmin (m, juce::jmax (1, in.gateEvents[nextEvent].offset - off));
+        bool gateMoving = gatePos < gateLen || gateS < 1.0f;
+        for (int i = 0; i < m; ++i)
+        {
+            if (gatePos < gateLen)
+            {
+                const float t = (float) (++gatePos) / (float) gateLen;
+                gateS = gateFrom + (gateTo - gateFrom) * (0.5f - 0.5f * std::cos (t * 3.14159265f));
+            }
+            else gateS = gateTo;
+            gateBuf[i] = gateS;
+        }
+        gateMoving = gateMoving || gateS < 1.0f;
         for (int k = 0; k < np; ++k)
         {
             if (d->p[k].isChoice()) smoothN[k] = target[k];
@@ -261,6 +289,9 @@ void GridEffect::process (float* L, float* R, int n, const SlotInput& in)
         float* l = L + off;
         float* r = R + off;
         for (int i = 0; i < m; ++i) { dryL[i] = l[i]; dryR[i] = r[i]; inSq += 0.25f * (l[i] + r[i]) * (l[i] + r[i]); }
+        // Ring: the sequencer gates the effect's input, so tails ring out
+        const bool ring = in.gateRing && gateMoving;
+        if (ring) for (int i = 0; i < m; ++i) { l[i] *= gateBuf[i]; r[i] *= gateBuf[i]; }
 
         impl->process (l, r, m, ctx);
 
@@ -282,20 +313,32 @@ void GridEffect::process (float* L, float* R, int n, const SlotInput& in)
         for (int i = 0; i < m; ++i)
         {
             const float t = (float) (i + 1) / (float) m;
-            const float w = (mix0 + (mixS - mix0) * t) * (act0 + (activeS - act0) * t);
+            float w = (mix0 + (mixS - mix0) * t) * (act0 + (activeS - act0) * t);
+            // Cut: the sequencer fades the wet signal (an off step passes dry);
+            // Ring: the dry path opens fully while off, the wet tail keeps its gain
+            if (gateMoving && ! ring) w *= gateBuf[i];
+            const float dryOpen = ring ? 1.0f - gateBuf[i] : 0.0f;
             if (equalPower)
             {
                 const float gd = std::cos (w * 1.5707963f), gw = std::sin (w * 1.5707963f);
-                l[i] = dryL[i] * gd + l[i] * gw;
-                r[i] = dryR[i] * gd + r[i] * gw;
+                const float dg = dryOpen > 0.0f ? gd + (1.0f - gd) * dryOpen : gd;
+                l[i] = dryL[i] * dg + l[i] * gw;
+                r[i] = dryR[i] * dg + r[i] * gw;
             }
-            else
+            else if (dryOpen > 0.0f)
+            {
+                const float dg = (1.0f - w) + w * dryOpen;
+                l[i] = dryL[i] * dg + l[i] * w;
+                r[i] = dryR[i] * dg + r[i] * w;
+            }
+            else   // (the original form: bit-identical output when the sequencer is idle)
             {
                 l[i] = dryL[i] + (l[i] - dryL[i]) * w;
                 r[i] = dryR[i] + (r[i] - dryR[i]) * w;
             }
         }
         freePpq += beatsPerSample * m;
+        off += m;
     }
 
     for (int k = 0; k < kMaxParams; ++k)

@@ -44,6 +44,11 @@ EfxGridProcessor::EfxGridProcessor()
                   juce::AudioParameterFloatAttributes().withStringFromValueFunction ([] (float v, int) { return juce::String (juce::roundToInt (v * 100.0f)) + "%"; })));
               layout.add (std::make_unique<juce::AudioParameterBool> (id ("bypass"), pre + "Bypass", false));
           }
+          // effect sequencer (appended: every earlier parameter keeps its place)
+          layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "seq_on", 1 }, "Sequencer On", false));
+          juce::StringArray scenes;
+          for (int i = 1; i <= seq::kScenes; ++i) scenes.add ("Scene " + juce::String (i));
+          layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "seq_scene", 1 }, "Sequencer Scene", scenes, 0));
           return layout;
       }())
 {
@@ -59,6 +64,14 @@ EfxGridProcessor::EfxGridProcessor()
         apvts.addParameterListener (p ("fx"), this);
         for (int k = 0; k < kMaxParams; ++k) macroDepth[s][k].store (0.0f);
     }
+    seqOnParam = dynamic_cast<juce::AudioParameterBool*> (apvts.getParameter ("seq_on"));
+    seqSceneParam = dynamic_cast<juce::AudioParameterChoice*> (apvts.getParameter ("seq_scene"));
+    for (int s = 0; s < kSlots; ++s)
+    {
+        setSlotLanes (s, seq::SlotLanes {});
+        gateState[s] = true;
+    }
+    for (int sc = 0; sc < seq::kScenes; ++sc) setSceneSettings (sc, seq::SceneSettings {});
     startTimerHz (10);   // retired-instance purge + effect idle work
     setLatencySamples (0);
     midiLearn.onPresetStep = [this] (int delta) { presets::step (*this, delta); };
@@ -140,6 +153,7 @@ EfxGridProcessor::SlotState EfxGridProcessor::getSlotState (int slot) const
     st.table = tables[(size_t) slot];
     st.asset = assets[(size_t) slot];
     for (int i = 0; i < efx::kDataSize; ++i) st.data[i] = slotData[slot][i].load();
+    st.lanes = getSlotLanes (slot);
     return st;
 }
 
@@ -152,6 +166,7 @@ EfxGridProcessor::SlotState EfxGridProcessor::defaultState (int fxId) const
         for (int k = 0; k < kMaxParams; ++k) { st.p[k] = d->p[k].def; st.depth[k] = d->macroDepth[k]; }
         st.mix = d->mixDef;
         if (auto fx = efx::createEffect (fxId)) fx->defaultData (st.data);   // the effect defines its shape-data layout
+        st.lanes.tail = d->cat == efx::CatSpace ? seq::Ring : seq::Cut;      // delays and reverbs ring out by default
     }
     return st;
 }
@@ -173,6 +188,7 @@ void EfxGridProcessor::setSlotState (int slot, const SlotState& st)
     setAsset (slot, st.asset);
     for (int i = 0; i < efx::kDataSize; ++i) slotData[slot][i].store (st.data[i]);
     ++dataGen[slot];
+    setSlotLanes (slot, st.lanes);
     if (fxChoice[slot] != nullptr) setParamNorm (paramId (slot, "fx"), fxChoice[slot]->convertTo0to1 ((float) st.fx));
 }
 
@@ -180,7 +196,15 @@ void EfxGridProcessor::loadEffect (int slot, int fxId)
 {
     if (slot < 0 || slot >= kSlots) return;
     if (fxId <= 0) { clearSlotCompact (slot); return; }
-    setSlotState (slot, defaultState (fxId));
+    auto st = defaultState (fxId);
+    if (getSlotEffectId (slot) > 0)
+    {
+        // replacing an effect keeps its steps (Ring only where the new effect has a tail)
+        const int tail = st.lanes.tail;
+        st.lanes = getSlotLanes (slot);
+        if (tail == seq::Cut) st.lanes.tail = seq::Cut;
+    }
+    setSlotState (slot, st);
     undoCheckpoint();
     if (onSlotsChanged) onSlotsChanged();
 }
@@ -507,6 +531,8 @@ void EfxGridProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     float* L = buffer.getWritePointer (0);
     float* R = buffer.getWritePointer (1);
 
+    scheduleSequencer (ppq, bpm / (60.0 * currentSampleRate), n, hostPlaying, midi);
+
     for (int s = 0; s < kSlots; ++s)
     {
         auto* fx = slots[(size_t) s].active.load (std::memory_order_acquire);
@@ -533,6 +559,9 @@ void EfxGridProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         in.playing = true;   // ppq is always valid (host or free-running clock)
         in.scL = scL; in.scR = scR;
         in.data = data; in.dataGen = dataGen[s].load (std::memory_order_relaxed);
+        in.gateEvents = gateEv[s]; in.numGateEvents = gateEvN[s];
+        in.gateRing = laneTailA[s].load (std::memory_order_relaxed) == seq::Ring && slotHasTail (s);
+        in.gateFadeMs = seqFadeMs.load (std::memory_order_relaxed);
         fx->process (L, R, n, in);
     }
 }
@@ -569,6 +598,19 @@ void EfxGridProcessor::writeExtrasToState()
         float d[kMaxParams];
         for (int k = 0; k < kMaxParams; ++k) d[k] = macroDepth[s][k].load();
         slot.setProperty ("macroDepth", floatsToString (d, kMaxParams), nullptr);
+        {
+            const auto ln = getSlotLanes (s);
+            juce::StringArray steps, timing;
+            for (int sc = 0; sc < seq::kScenes; ++sc)
+            {
+                steps.add (juce::String::toHexString ((juce::int64) ln.lanes[sc].steps));
+                timing.add (juce::String (ln.lanes[sc].len) + ":" + juce::String (ln.lanes[sc].rate));
+            }
+            slot.setProperty ("seqMode", ln.mode, nullptr);
+            slot.setProperty ("seqTail", ln.tail, nullptr);
+            slot.setProperty ("seqSteps", steps.joinIntoString (" "), nullptr);
+            slot.setProperty ("seqTiming", timing.joinIntoString (" "), nullptr);
+        }
         if (auto* fx = efx::defForId (getSlotEffectId (s)); fx != nullptr)
         {
             float data[efx::kDataSize];
@@ -611,6 +653,18 @@ void EfxGridProcessor::writeExtrasToState()
         }
         extras.appendChild (slot, nullptr);
     }
+    // sequencer scenes (lanes are written per slot above)
+    juce::ValueTree sq ("SEQ");
+    juce::StringArray scenes;
+    for (int sc = 0; sc < seq::kScenes; ++sc)
+    {
+        const auto ss = sceneSettings (sc);
+        scenes.add (juce::String (ss.steps) + ":" + juce::String (ss.rate) + ":" + juce::String (ss.swing, 3));
+    }
+    sq.setProperty ("scenes", scenes.joinIntoString (" "), nullptr);
+    sq.setProperty ("fadeMs", seqFadeMs.load(), nullptr);
+    sq.setProperty ("playing", seqPlaying.load(), nullptr);
+    extras.appendChild (sq, nullptr);
     state.appendChild (extras, nullptr);
 }
 
@@ -625,11 +679,49 @@ void EfxGridProcessor::readExtrasFromState()
         ++dataGen[s];
         setTable (s, nullptr);
         setAsset (s, nullptr);
+        setSlotLanes (s, d0.lanes);   // version 4 and older: every lane on Always
+    }
+    for (int sc = 0; sc < seq::kScenes; ++sc) setSceneSettings (sc, seq::SceneSettings {});
+    seqPlaying.store (0); seqQueued.store (-1);
+    if (const auto sq = extras.getChildWithName ("SEQ"); sq.isValid())
+    {
+        juce::StringArray scenes;
+        scenes.addTokens (sq.getProperty ("scenes").toString(), " ", "");
+        for (int sc = 0; sc < juce::jmin (seq::kScenes, scenes.size()); ++sc)
+        {
+            juce::StringArray f;
+            f.addTokens (scenes[sc], ":", "");
+            seq::SceneSettings ss;
+            ss.steps = juce::jlimit (1, seq::kMaxSteps, f[0].getIntValue());
+            ss.rate = juce::jlimit (0, seq::kNumRates - 1, f[1].getIntValue());
+            ss.swing = juce::jlimit (0.0f, 0.75f, f[2].getFloatValue());
+            setSceneSettings (sc, ss);
+        }
+        seqFadeMs.store (juce::jlimit (1.0f, 10.0f, (float) sq.getProperty ("fadeMs", 3.0f)));
+        seqPlaying.store (juce::jlimit (0, seq::kScenes - 1, (int) sq.getProperty ("playing", 0)));
     }
     for (const auto& slot : extras)
     {
         const int s = slot.getProperty ("index", -1);
         if (s < 0 || s >= kSlots) continue;
+        if (slot.hasProperty ("seqSteps"))
+        {
+            seq::SlotLanes ln;
+            ln.mode = juce::jlimit (0, 1, (int) slot.getProperty ("seqMode", 0));
+            ln.tail = juce::jlimit (0, 1, (int) slot.getProperty ("seqTail", 0));
+            juce::StringArray steps, timing;
+            steps.addTokens (slot.getProperty ("seqSteps").toString(), " ", "");
+            timing.addTokens (slot.getProperty ("seqTiming").toString(), " ", "");
+            for (int sc = 0; sc < seq::kScenes; ++sc)
+            {
+                ln.lanes[sc].steps = (uint32_t) steps[sc].getHexValue64();
+                juce::StringArray t;
+                t.addTokens (timing[sc], ":", "");
+                ln.lanes[sc].len = t.size() > 0 ? juce::jlimit (0, seq::kMaxSteps, t[0].getIntValue()) : 0;
+                ln.lanes[sc].rate = t.size() > 1 ? juce::jlimit (-1, seq::kNumRates - 1, t[1].getIntValue()) : -1;
+            }
+            setSlotLanes (s, ln);
+        }
         float d[kMaxParams];
         const int nd = stringToFloats (slot.getProperty ("macroDepth").toString(), d, kMaxParams);
         for (int k = 0; k < nd; ++k) macroDepth[s][k].store (juce::jlimit (-1.0f, 1.0f, d[k]));
@@ -793,11 +885,13 @@ EfxGridProcessor::Snapshot EfxGridProcessor::takeSnapshot() const
 {
     Snapshot sn;
     for (int s = 0; s < kSlots; ++s) sn[(size_t) s] = getSlotState (s);
+    for (int sc = 0; sc < seq::kScenes; ++sc) sn.scenes[sc] = sceneSettings (sc);
     return sn;
 }
 
 bool EfxGridProcessor::sameSlot (const SlotState& a, const SlotState& b)
 {
+    if (! (a.lanes == b.lanes)) return false;
     if (a.fx != b.fx || a.mode != b.mode || a.bypass != b.bypass || a.table != b.table || a.asset != b.asset) return false;
     if (std::abs (a.macro - b.macro) > 1.0e-6f || std::abs (a.mix - b.mix) > 1.0e-6f) return false;
     for (int k = 0; k < kMaxParams; ++k)
@@ -812,6 +906,7 @@ void EfxGridProcessor::applySnapshot (const Snapshot& sn)
     for (int s = 0; s < kSlots; ++s)
         if (! sameSlot (getSlotState (s), sn[(size_t) s]))
             setSlotState (s, sn[(size_t) s]);
+    for (int sc = 0; sc < seq::kScenes; ++sc) setSceneSettings (sc, sn.scenes[sc]);
     updateHostDisplay (ChangeDetails().withNonParameterStateChanged (true));
     if (onSlotsChanged) onSlotsChanged();
 }
@@ -828,6 +923,7 @@ void EfxGridProcessor::undoCheckpoint (bool mergeRecent)
     if (undoBase == nullptr) { undoBase = std::move (now); return; }
     bool changed = false;
     for (int s = 0; s < kSlots && ! changed; ++s) changed = ! sameSlot ((*undoBase)[(size_t) s], (*now)[(size_t) s]);
+    for (int sc = 0; sc < seq::kScenes && ! changed; ++sc) changed = ! (undoBase->scenes[sc] == now->scenes[sc]);
     if (! changed) return;
     const auto t = juce::Time::getMillisecondCounter();
     // a quick run of small edits (scroll wheel) folds into the last step
@@ -1031,4 +1127,198 @@ void EfxGridProcessor::randomNewChain()
     }
     presetName = "Random Chain"; presetIndex = -1;
     if (onSlotsChanged) onSlotsChanged();
+}
+
+// ------------------------------------------------------------------ effect sequencer
+seq::SlotLanes EfxGridProcessor::getSlotLanes (int slot) const
+{
+    seq::SlotLanes ln;
+    slot = juce::jlimit (0, kSlots - 1, slot);
+    ln.mode = laneModeA[slot].load();
+    ln.tail = laneTailA[slot].load();
+    for (int sc = 0; sc < seq::kScenes; ++sc)
+    {
+        ln.lanes[sc].steps = laneStepsA[slot][sc].load();
+        ln.lanes[sc].len = laneLenA[slot][sc].load();
+        ln.lanes[sc].rate = laneRateA[slot][sc].load();
+    }
+    return ln;
+}
+
+void EfxGridProcessor::setSlotLanes (int slot, const seq::SlotLanes& ln)
+{
+    if (slot < 0 || slot >= kSlots) return;
+    laneModeA[slot].store (ln.mode);
+    laneTailA[slot].store (ln.tail);
+    for (int sc = 0; sc < seq::kScenes; ++sc)
+    {
+        laneStepsA[slot][sc].store (ln.lanes[sc].steps);
+        laneLenA[slot][sc].store (ln.lanes[sc].len);
+        laneRateA[slot][sc].store (ln.lanes[sc].rate);
+    }
+}
+
+uint32_t EfxGridProcessor::laneSteps (int slot, int scene) const
+{
+    return laneStepsA[juce::jlimit (0, kSlots - 1, slot)][juce::jlimit (0, seq::kScenes - 1, scene)].load();
+}
+
+void EfxGridProcessor::setLaneSteps (int slot, int scene, uint32_t mask)
+{
+    if (slot < 0 || slot >= kSlots || scene < 0 || scene >= seq::kScenes) return;
+    laneStepsA[slot][scene].store (mask);
+    seqEdited();
+}
+
+void EfxGridProcessor::setLaneMode (int slot, int mode)
+{
+    if (slot < 0 || slot >= kSlots) return;
+    laneModeA[slot].store (juce::jlimit (0, 1, mode));
+    seqEdited();
+}
+
+void EfxGridProcessor::setLaneTail (int slot, int tail)
+{
+    if (slot < 0 || slot >= kSlots) return;
+    laneTailA[slot].store (slotHasTail (slot) ? juce::jlimit (0, 1, tail) : (int) seq::Cut);
+    seqEdited();
+}
+
+void EfxGridProcessor::setLaneTiming (int slot, int scene, int len, int rate)
+{
+    if (slot < 0 || slot >= kSlots || scene < 0 || scene >= seq::kScenes) return;
+    laneLenA[slot][scene].store (juce::jlimit (0, seq::kMaxSteps, len));
+    laneRateA[slot][scene].store (juce::jlimit (-1, seq::kNumRates - 1, rate));
+    seqEdited();
+}
+
+seq::SceneSettings EfxGridProcessor::sceneSettings (int scene) const
+{
+    scene = juce::jlimit (0, seq::kScenes - 1, scene);
+    seq::SceneSettings ss;
+    ss.steps = sceneStepsA[scene].load();
+    ss.rate = sceneRateA[scene].load();
+    ss.swing = sceneSwingA[scene].load();
+    return ss;
+}
+
+void EfxGridProcessor::setSceneSettings (int scene, const seq::SceneSettings& ss)
+{
+    if (scene < 0 || scene >= seq::kScenes) return;
+    sceneStepsA[scene].store (juce::jlimit (1, seq::kMaxSteps, ss.steps));
+    sceneRateA[scene].store (juce::jlimit (0, seq::kNumRates - 1, ss.rate));
+    sceneSwingA[scene].store (juce::jlimit (0.0f, 0.75f, ss.swing));
+}
+
+bool EfxGridProcessor::seqEnabled() const { return seqOnParam != nullptr && seqOnParam->get(); }
+
+void EfxGridProcessor::setSeqEnabled (bool on)
+{
+    setParamNorm ("seq_on", on ? 1.0f : 0.0f);
+}
+
+void EfxGridProcessor::requestScene (int scene)
+{
+    scene = juce::jlimit (0, seq::kScenes - 1, scene);
+    if (seqSceneParam != nullptr) setParamNorm ("seq_scene", seqSceneParam->convertTo0to1 ((float) scene));
+}
+
+bool EfxGridProcessor::slotHasTail (int slot) const
+{
+    const auto* d = efx::defForId (getSlotEffectId (slot));
+    return d != nullptr && d->cat == efx::CatSpace;
+}
+
+void EfxGridProcessor::seqEdited()
+{
+    ++stateGen;
+    updateHostDisplay (ChangeDetails().withNonParameterStateChanged (true));
+}
+
+// Per block: turn the scene and the host clock into gate events per slot.
+// Scene requests (automation, the scene pads, MIDI notes) wait for the end of
+// the playing scene's pattern while the host plays, and switch at once
+// otherwise. A stopped host closes every sequenced lane (Always lanes play).
+void EfxGridProcessor::scheduleSequencer (double ppq, double bps, int n, bool hostPlaying, const juce::MidiBuffer& midi)
+{
+    const bool on = seqEnabled();
+    // MIDI: C1..D#2 select scenes, C3..D#4 hold live pads (open a slot's lane)
+    int sceneReq = seqQueued.load (std::memory_order_relaxed);
+    for (const auto md : midi)
+    {
+        const auto msg = md.getMessage();
+        const int note = msg.getNoteNumber();
+        if (msg.isNoteOn() && note >= 36 && note < 36 + seq::kScenes) sceneReq = note - 36;
+        if ((msg.isNoteOn() || msg.isNoteOff()) && note >= 60 && note < 60 + kSlots) livePad[note - 60] = msg.isNoteOn();
+    }
+    if (seqSceneParam != nullptr)
+    {
+        const int ps = seqSceneParam->getIndex();
+        if (ps != lastSceneParam) { if (lastSceneParam >= 0) sceneReq = ps; lastSceneParam = ps; }
+    }
+    int cur = seqPlaying.load (std::memory_order_relaxed);
+    int switchAt = -1, next = cur;
+    if (sceneReq >= 0 && sceneReq != cur)
+    {
+        if (! on || ! hostPlaying) { cur = next = sceneReq; sceneReq = -1; }
+        else
+        {
+            const auto ss = sceneSettings (cur);
+            const double pattern = (double) ss.steps * seq::rateBeats (ss.rate);
+            const double boundary = std::ceil (ppq / pattern - 1.0e-9) * pattern;
+            const int off = (int) std::ceil ((boundary - ppq) / bps - 1.0e-9);
+            if (off < n) { switchAt = juce::jmax (0, off); next = sceneReq; sceneReq = -1; }
+        }
+    }
+    else if (sceneReq == cur) sceneReq = -1;
+    seqQueued.store (sceneReq, std::memory_order_relaxed);
+
+    const auto scA = sceneSettings (cur), scB = sceneSettings (next);
+    for (int s = 0; s < kSlots; ++s)
+    {
+        gateEvN[s] = 0;
+        auto* fx = slots[(size_t) s].active.load (std::memory_order_acquire);
+        if (fx != gateFx[s]) { gateFx[s] = fx; gateState[s] = true; }   // a new instance starts open
+        if (fx == nullptr) continue;
+        const bool pad = livePad[s] || livePadUi[(size_t) s].load (std::memory_order_relaxed);
+        const bool sequenced = on && laneModeA[s].load (std::memory_order_relaxed) == seq::Sequenced;
+        seq::GateEvent ev[seq::kMaxEvents];
+        int count = 0;
+        bool open = gateState[s];
+        if (! sequenced || pad || ! hostPlaying)
+        {
+            const bool want = ! sequenced || pad;
+            if (want != open) { ev[0].offset = 0; ev[0].on = want; ev[0].runBeats = pad ? 1.0e9 : 0.0; count = 1; open = want; }
+        }
+        else
+        {
+            seq::Lane la, lb;
+            la.steps = laneStepsA[s][cur].load (std::memory_order_relaxed);
+            la.len = laneLenA[s][cur].load (std::memory_order_relaxed);
+            la.rate = laneRateA[s][cur].load (std::memory_order_relaxed);
+            const auto ca = seq::LaneClock::make (la, scA);
+            if (switchAt < 0) count = seq::laneEvents (ca, ppq, bps, n, open, ev, seq::kMaxEvents);
+            else
+            {
+                lb.steps = laneStepsA[s][next].load (std::memory_order_relaxed);
+                lb.len = laneLenA[s][next].load (std::memory_order_relaxed);
+                lb.rate = laneRateA[s][next].load (std::memory_order_relaxed);
+                const auto cb = seq::LaneClock::make (lb, scB);
+                count = seq::laneEvents (ca, ppq, bps, switchAt, open, ev, seq::kMaxEvents);
+                count += seq::laneEvents (cb, ppq + bps * switchAt, bps, n - switchAt, open, ev + count, seq::kMaxEvents - count, switchAt);
+            }
+        }
+        gateState[s] = open;
+        for (int i = 0; i < count; ++i)
+        {
+            auto& g = gateEv[s][i];
+            g.offset = ev[i].offset; g.on = ev[i].on; g.runBeats = ev[i].runBeats; g.phaseBeats = ev[i].phaseBeats;
+        }
+        gateEvN[s] = count;
+        gateUi[(size_t) s].store (open, std::memory_order_relaxed);
+    }
+    if (next != cur || switchAt >= 0) cur = next;
+    seqPlaying.store (cur, std::memory_order_relaxed);
+    seqPpqUi.store (ppq + bps * n, std::memory_order_relaxed);
+    seqRunningUi.store (on && hostPlaying, std::memory_order_relaxed);
 }

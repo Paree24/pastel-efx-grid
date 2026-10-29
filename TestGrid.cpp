@@ -11,6 +11,7 @@
 //   cpu          real-time factor per effect
 #include <algorithm>
 #include "dsp/Effects.h"
+#include "Sequencer.h"
 #include <juce_core/juce_core.h>
 #include <cstdio>
 #include <random>
@@ -774,6 +775,205 @@ static int runSignalTests()
     return checkFails - before;
 }
 
+
+// ---------------------------------------------------------------- effect sequencer
+namespace
+{
+// run the scheduler over consecutive host blocks; returns absolute sample positions of edges
+struct Edge { long long at; bool on; double run, phase; };
+std::vector<Edge> scheduleRun (const seq::LaneClock& c, double ppq0, double bpm, int block, long long total, bool startOpen = false)
+{
+    std::vector<Edge> out;
+    const double bps = bpm / (60.0 * kSr);
+    bool open = startOpen;
+    seq::GateEvent ev[seq::kMaxEvents];
+    for (long long pos = 0; pos < total; pos += block)
+    {
+        const int n = (int) std::min<long long> (block, total - pos);
+        const int cnt = seq::laneEvents (c, ppq0 + bps * (double) pos, bps, n, open, ev, seq::kMaxEvents);
+        for (int i = 0; i < cnt; ++i) out.push_back ({ pos + ev[i].offset, ev[i].on, ev[i].runBeats, ev[i].phaseBeats });
+    }
+    return out;
+}
+}
+
+static int runSequencerTests()
+{
+    std::printf ("\n== effect sequencer ==\n");
+    const int before = checkFails;
+
+    // 1. edge timing: every gate edge within 1 sample of its exact time
+    {
+        const uint32_t mask = 0b1011000111001101u;   // runs of 1, 2 and 3 steps
+        int bad = 0, cases = 0, edges = 0;
+        for (double bpm : { 60.0, 120.5, 174.0 })
+            for (int rate = 0; rate < seq::kNumRates; ++rate)
+                for (double swing : { 0.0, 0.3 })
+                    for (int block : { 1, 31, 64, 512, 4096 })
+                    {
+                        seq::Lane l; l.steps = mask;
+                        seq::SceneSettings sc; sc.steps = 16; sc.rate = rate; sc.swing = (float) swing;
+                        const auto c = seq::LaneClock::make (l, sc);
+                        const int steps = rate < 9 ? 18 : 34;          // long rates: fewer steps (keeps the run short)
+                        const double samplesPerBeat = kSr * 60.0 / bpm;
+                        const long long total = (long long) std::ceil (c.stepStart (steps) * samplesPerBeat);
+                        if (block == 1 && total > 400000) continue;
+                        ++cases;
+                        const auto got = scheduleRun (c, 0.0, bpm, block, total);
+                        // expected: every step boundary where the bit changes (starting closed)
+                        std::vector<std::pair<double, bool>> want;
+                        bool prev = false;
+                        // (an edge lands on the first sample at or after its exact time, inside the run)
+                        for (long long k = 0; std::ceil (c.stepStart (k) * samplesPerBeat - 1.0e-6) < (double) total; ++k)
+                            if (c.bit (k) != prev) { prev = c.bit (k); want.push_back ({ c.stepStart (k) * samplesPerBeat, prev }); }
+                        if (got.size() != want.size())
+                        {
+                            if (bad < 3) std::printf ("    count mismatch bpm %.1f rate %s swing %.1f block %d: got %d want %d\n", bpm, seq::rateName (rate), swing, block, (int) got.size(), (int) want.size());
+                            ++bad; continue;
+                        }
+                        for (size_t i = 0; i < got.size(); ++i)
+                        {
+                            ++edges;
+                            if (got[i].on != want[i].second || std::abs ((double) got[i].at - want[i].first) > 1.0)
+                            {
+                                if (bad < 3) std::printf ("    edge %d bpm %.1f rate %s swing %.1f block %d: got %lld (%d) want %.2f (%d)\n", (int) i, bpm, seq::rateName (rate), swing, block, got[i].at, (int) got[i].on, want[i].first, (int) want[i].second);
+                                ++bad; break;
+                            }
+                        }
+                    }
+        std::printf ("  (%d cases, %d edges)\n", cases, edges);
+        expect ("seq: gate edges within 1 sample (rates x tempos x blocks x swing)", (float) bad, 0.0f, 0.01f);
+    }
+    // 2. runs and wrap: steps 14 15 0 1 on: one gate per loop, open across the loop point
+    {
+        seq::Lane l; l.steps = (1u << 14) | (1u << 15) | 1u | 2u;
+        const auto c = seq::LaneClock::make (l, seq::SceneSettings {});
+        const double spb = kSr * 60.0 / 120.0;
+        const auto got = scheduleRun (c, 0.0, 120.0, 512, (long long) (c.stepStart (48) * spb));
+        // open at sample 0 (steps 0-1), then one run per loop starting at step 14
+        int ons = 0, offs = 0, atLoop = 0;
+        double runAt14 = 0.0;
+        for (auto& e : got)
+        {
+            (e.on ? ons : offs)++;
+            for (int loop = 1; loop < 3; ++loop) if (std::llabs (e.at - (long long) std::ceil (c.stepStart (16 * loop) * spb)) <= 1) ++atLoop;
+            if (e.on && std::llabs (e.at - (long long) std::ceil (c.stepStart (14) * spb)) <= 1) runAt14 = e.run;
+        }
+        expect ("seq: wrap run: no gate change at the loop point", (float) atLoop, 0.0f, 0.01f);
+        expect ("seq: wrap run: gate-ons (start + 3 loops)", (float) ons, 4.0f, 0.01f);
+        expect ("seq: wrap run: gate-offs (one per loop)", (float) offs, 3.0f, 0.01f);
+        expect ("seq: wrap run length (beats, 4 x 1/16)", (float) runAt14, 1.0f, 1e-4f);
+    }
+    // 3. host jump into the middle of a run opens at once, with the phase gone
+    {
+        seq::Lane l; l.steps = 0b11110000u;   // steps 4..7
+        const auto c = seq::LaneClock::make (l, seq::SceneSettings {});
+        const auto got = scheduleRun (c, 5.5 * 0.25, 120.0, 512, 2000);
+        expect ("seq: jump into a run opens at sample 0", (float) (got.empty() ? -1 : got[0].at), 0.0f, 0.01f);
+        expect ("seq: ... with the elapsed phase (beats)", (float) (got.empty() ? -1 : got[0].phase), 0.375f, 1e-3f);
+        expect ("seq: ... and the full run length (beats)", (float) (got.empty() ? -1 : got[0].run), 1.0f, 1e-3f);
+    }
+    // 4. polyrhythm: a 5-step and a 16-step lane line up again every 80 steps
+    {
+        seq::Lane a; a.steps = 0b10011u; a.len = 5;
+        seq::Lane b; b.steps = 0x8421u;
+        const auto ca = seq::LaneClock::make (a, seq::SceneSettings {}), cb = seq::LaneClock::make (b, seq::SceneSettings {});
+        int mismatch = 0, earlier = 0;
+        for (long long k = 0; k < 160; ++k)
+        {
+            if (ca.bit (k) != ca.bit (k + 80) || cb.bit (k) != cb.bit (k + 80)) ++mismatch;
+            if (k > 0 && k < 80 && ca.bit (k) == ca.bit (0) && cb.bit (k) == cb.bit (0) && ca.bit (k + 1) == ca.bit (1) && cb.bit (k + 1) == cb.bit (1)
+                && ca.bit (k + 2) == ca.bit (2) && cb.bit (k + 2) == cb.bit (2) && ca.bit (k + 3) == ca.bit (3) && cb.bit (k + 3) == cb.bit (3)
+                && ca.bit (k + 4) == ca.bit (4) && cb.bit (k + 4) == cb.bit (4) && ca.bit (k + 5) == ca.bit (5) && cb.bit (k + 5) == cb.bit (5)) ++earlier;
+        }
+        expect ("seq: 5- and 16-step lanes repeat together after 80 steps", (float) mismatch, 0.0f, 0.01f);
+        expect ("seq: euclid(16, 5) has 5 pulses", (float) __builtin_popcount (seq::euclid (16, 5, 0)), 5.0f, 0.01f);
+        juce::ignoreUnused (earlier);
+    }
+    // 5. GridEffect: Cut lane returns the input bit-exactly while off; Ring keeps a delay tail
+    auto runGated = [&] (const char* name, const std::vector<float>& in, const std::vector<std::pair<int, bool>>& edges, bool ring,
+                         std::vector<std::pair<const char*, float>> set = {}, float fadeMs = 3.0f, float mix = -1.0f)
+    {
+        const int id = idForName (name);
+        const auto& d = *defForId (id);
+        GridEffect fx (id);
+        fx.prepare (kSr, 512);
+        Run r = defaults (d);
+        if (mix >= 0.0f) r.mix = mix;
+        for (auto& [nm, v] : set) for (int k = 0; k < d.numParams; ++k) if (juce::String (d.p[k].name) == nm) r.norm[k] = mapParam (d.p[k], v);
+        std::vector<float> out (in.size()), L (512), R (512);
+        size_t e = 0;
+        for (size_t off = 0; off < in.size(); off += 512)
+        {
+            const int n = (int) std::min<size_t> (512, in.size() - off);
+            for (int i = 0; i < n; ++i) L[(size_t) i] = R[(size_t) i] = in[off + (size_t) i];
+            SlotInput::GateEvent ev[32]; int cnt = 0;
+            while (e < edges.size() && edges[e].first < (int) (off + (size_t) n))
+            {
+                ev[cnt].offset = edges[e].first - (int) off; ev[cnt].on = edges[e].second; ev[cnt].runBeats = 1.0; ++cnt; ++e;
+            }
+            SlotInput si; si.norm = r.norm; si.macroDepth = r.depth; si.mix = r.mix; si.bpm = 120.0; si.ppq = (double) off / kSr * 2.0; si.playing = true;
+            si.gateEvents = ev; si.numGateEvents = cnt; si.gateRing = ring; si.gateFadeMs = fadeMs;
+            fx.process (L.data(), R.data(), n, si);
+            for (int i = 0; i < n; ++i) out[off + (size_t) i] = L[(size_t) i];
+        }
+        return out;
+    };
+    {
+        const size_t N = (size_t) kSr * 2;
+        std::vector<float> in (N);
+        for (size_t i = 0; i < N; ++i) in[i] = (float) (0.4 * sine (440.0, i));
+        // off from 0.5 s on (3 ms fade), check from 0.52 s
+        const auto out = runGated ("Bitcrusher", in, { { (int) (kSr / 2), false } }, false, { { "Bits", 4.0f } });
+        double worst = 0.0, onDiff = 0.0;
+        for (size_t i = (size_t) (0.52 * kSr); i < N; ++i) worst = std::max (worst, (double) std::abs (out[i] - in[i]));
+        for (size_t i = (size_t) (0.1 * kSr); i < (size_t) (0.45 * kSr); ++i) onDiff = std::max (onDiff, (double) std::abs (out[i] - in[i]));
+        expect ("seq: Cut lane off = input bit-exact (max err)", (float) worst, 0.0f, 0.0f);
+        expect ("seq: ... and the effect plays while on (crushed, err > 0.01)", onDiff > 0.01 ? 1.0f : 0.0f, 1.0f, 0.01f);
+    }
+    {
+        // Ring: a burst while on, then a different tone after the gate closes
+        const size_t N = (size_t) kSr * 3;
+        std::vector<float> in (N, 0.0f);
+        for (size_t i = 0; i < (size_t) (0.2 * kSr); ++i) in[i] = (float) (0.4 * sine (500.0, i));
+        for (size_t i = (size_t) (0.6 * kSr); i < N; ++i) in[i] = (float) (0.4 * sine (1300.0, i));
+        const auto out = runGated ("Simple Delay", in, { { (int) (0.3 * kSr), false } }, true, { { "Sync", 0.0f }, { "Time", 250.0f }, { "Feedback", 0.5f } }, 3.0f, 1.0f);
+        std::vector<float> wet (N);
+        for (size_t i = 0; i < N; ++i) wet[i] = out[i] - in[i];
+        const double tail = toneDb (wet, 500.0, (size_t) (0.45 * kSr), (size_t) (0.75 * kSr));
+        const double leak = toneDb (wet, 1300.0, (size_t) (1.0 * kSr), N);
+        const double dry = toneDb (out, 1300.0, (size_t) (1.0 * kSr), N) - toneDb (in, 1300.0, (size_t) (1.0 * kSr), N);
+        expect ("seq: Ring lane keeps the delay tail after closing (dBFS, >= -40)", (float) std::max (-40.0, tail), -40.0f, 40.0f);
+        expect ("seq: ... new input isn't echoed (dBFS, <= -80)", (float) std::max (-80.0, leak), -80.0f, 0.01f);
+        expect ("seq: ... and the dry path is fully open (dB)", (float) dry, 0.0f, 0.1f);
+    }
+    {
+        // no clicks: a lane toggling every 1/16 on a crushed sine, at every fade
+        const size_t N = (size_t) kSr * 2;
+        std::vector<float> in (N);
+        for (size_t i = 0; i < N; ++i) in[i] = (float) (0.4 * sine (220.0, i));
+        float worst = 0.0f;
+        for (float fade : { 1.0f, 3.0f, 10.0f })
+        {
+            std::vector<std::pair<int, bool>> edges;
+            for (int k = 1; k < 30; ++k) edges.push_back ({ (int) (k * 0.0625 * kSr), (k % 2) == 0 });
+            const auto out = runGated ("Bitcrusher", in, edges, false, { { "Bits", 3.0f } }, fade);
+            const auto ref = runGated ("Bitcrusher", in, {}, false, { { "Bits", 3.0f } }, fade);
+            // the largest step the gate adds beyond what the crushed and the dry signal have on their own
+            float maxIn = 0.0f, maxRef = 0.0f, maxOut = 0.0f;
+            for (size_t i = 1; i < N; ++i)
+            {
+                maxIn = std::max (maxIn, std::abs (in[i] - in[i - 1]));
+                maxRef = std::max (maxRef, std::abs (ref[i] - ref[i - 1]));
+                maxOut = std::max (maxOut, std::abs (out[i] - out[i - 1]));
+            }
+            worst = std::max (worst, maxOut - std::max (maxIn, maxRef));
+        }
+        expect ("seq: gate edges add no clicks (excess step, <= 0.01)", std::max (0.01f, worst), 0.01f, 0.001f);
+    }
+    return checkFails - before;
+}
+
 // CI: report a crash with a stack trace instead of dying silently
 static void reportCrash (void*)
 {
@@ -781,10 +981,11 @@ static void reportCrash (void*)
     std::fflush (stdout);
 }
 
-int main()
+int main (int argc, char** argv)
 {
     std::setvbuf (stdout, nullptr, _IONBF, 0);   // unbuffered: CI keeps the output even if we crash
     juce::SystemStats::setApplicationCrashHandler (reportCrash);
+    if (argc > 1 && juce::String (argv[1]) == "seq") return runSequencerTests() == 0 ? 0 : 1;   // just the sequencer section
     int failures = 0, warnings = 0;
     std::mt19937 rng (12345);
     std::uniform_real_distribution<float> uni (0.0f, 1.0f);
@@ -936,6 +1137,7 @@ int main()
 
     failures += runAccuracy();
     failures += runSignalTests();
+    failures += runSequencerTests();
     std::printf ("\n%d failure(s), %d warning(s)\n", failures, warnings);
     return failures == 0 ? 0 : 1;
 }

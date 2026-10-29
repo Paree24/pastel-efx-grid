@@ -36,6 +36,22 @@ static void check (bool ok, const juce::String& what)
     std::printf ("%s %s\n", ok ? "  ok  " : "  FAIL", what.toRawUTF8());
 }
 
+
+// a host transport for the sequencer tests
+struct TestPlayHead : juce::AudioPlayHead
+{
+    double ppq = 0.0, bpm = 120.0;
+    bool playing = true;
+    juce::Optional<PositionInfo> getPosition() const override
+    {
+        PositionInfo p;
+        p.setBpm (bpm);
+        p.setPpqPosition (ppq);
+        p.setIsPlaying (playing);
+        return p;
+    }
+};
+
 // CI: report a crash with a stack trace instead of dying silently
 static void reportCrash (void*)
 {
@@ -783,6 +799,126 @@ int main (int argc, char** argv)
             check (proc.chainLength() >= 3 && proc.chainLength() <= 5 && noMeters, "random new chain: 3-5 effects, no meters");
             proc.reloadSlotsNow(); run (8);
             for (int s = proc.chainLength() - 1; s >= 0; --s) proc.clearSlotCompact (s);
+            proc.clearUndo();
+        }
+
+        // effect sequencer: host stop, scene switching, state, remap, undo
+        {
+            std::printf ("== effect sequencer (processor) ==\n");
+            for (int s2 = proc.chainLength() - 1; s2 >= 0; --s2) proc.clearSlotCompact (s2);
+            proc.appendEffect (idOf ("Bitcrusher"));
+            proc.appendEffect (idOf ("Simple Delay"));
+            proc.reloadSlotsNow();
+            { auto* p = proc.apvts.getParameter (EfxGridProcessor::paramId (0, "p0")); p->setValueNotifyingHost (p->convertTo0to1 (3.0f)); }   // 3 bits
+            proc.clearUndo();
+            TestPlayHead head;
+            proc.setPlayHead (&head);
+            // render n blocks of a sine; returns the max |out - in| over the last half
+            auto renderErr = [&] (int blocks)
+            {
+                long long t = 0;
+                float worst = 0.0f;
+                for (int b = 0; b < blocks; ++b)
+                {
+                    for (int k = 0; k < 512; ++k, ++t)
+                    {
+                        const float v = 0.4f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 220.0 * (double) t / 48000.0);
+                        buf.setSample (0, k, v); buf.setSample (1, k, v);
+                    }
+                    juce::AudioBuffer<float> in (buf);
+                    proc.processBlock (buf, midi);
+                    head.ppq += 512.0 * head.bpm / (60.0 * 48000.0);
+                    if (b >= blocks / 2)
+                        for (int k = 0; k < 512; ++k) worst = std::max (worst, std::abs (buf.getSample (0, k) - in.getSample (0, k)));
+                }
+                return worst;
+            };
+            proc.setSeqEnabled (true);
+            proc.apvts.getParameter (EfxGridProcessor::paramId (1, "bypass"))->setValueNotifyingHost (1.0f);   // just the crusher for now
+            proc.setLaneMode (0, seq::Sequenced);
+            proc.setLaneSteps (0, 0, 0xFFFFFFFFu);   // every step on
+            head.playing = true;
+            check (renderErr (40) > 0.01f, "seq: playing, all steps on: the crusher plays");
+            head.playing = false;
+            check (renderErr (40) == 0.0f, "seq: host stopped: the sequenced lane passes dry (bit-exact)");
+            proc.setLaneMode (0, seq::Always);
+            check (renderErr (40) > 0.01f, "seq: host stopped: an Always lane keeps playing");
+            proc.apvts.getParameter (EfxGridProcessor::paramId (1, "bypass"))->setValueNotifyingHost (0.0f);
+            // scene queue: scene 1 has the lane on, scene 0 off; asked for mid-pattern it waits for the boundary
+            proc.setLaneMode (0, seq::Sequenced);
+            proc.setLaneSteps (0, 0, 0u);
+            proc.setLaneSteps (0, 1, 0xFFFFFFFFu);
+            head.playing = true; head.ppq = 0.0;
+            proc.requestScene (0); renderErr (4);
+            head.ppq = 1.0;   // one beat into the 4-beat pattern
+            proc.requestScene (1);
+            renderErr (2);
+            check (proc.playingScene() == 0 && proc.queuedScene() == 1 && ! proc.slotGateOpen (0), "seq: scene request waits for the end of the pattern");
+            while (head.ppq < 4.2) renderErr (1);
+            check (proc.playingScene() == 1 && proc.slotGateOpen (0), "seq: ... and switches at the boundary");
+            // state round trip
+            seq::SceneSettings sc5; sc5.steps = 12; sc5.rate = 9; sc5.swing = 0.25f;
+            proc.setSceneSettings (5, sc5);
+            proc.setLaneTiming (1, 5, 5, 15);
+            proc.setLaneSteps (1, 5, 0b10101u);
+            proc.setLaneTail (1, seq::Ring);
+            juce::MemoryBlock mb;
+            proc.getStateInformation (mb);
+            const auto before = proc.getSlotLanes (1);
+            proc.setSlotLanes (1, seq::SlotLanes {});
+            proc.setSceneSettings (5, seq::SceneSettings {});
+            proc.setStateInformation (mb.getData(), (int) mb.getSize());
+            const auto after = proc.getSlotLanes (1);
+            check (after == before && proc.sceneSettings (5) == sc5 && proc.seqEnabled() && proc.getSlotLanes (0).lanes[1].steps == 0xFFFFFFFFu,
+                   "seq: state round trip keeps lanes, lane timing, tails and scenes");
+            // version 4 session: sequencer off, every lane Always
+            {
+                auto xml = proc.presetXml();
+                xml->setAttribute ("version", 4);
+                for (auto* e : xml->getChildIterator()) if (e->getStringAttribute ("id") == "seq_on") e->setAttribute ("value", 0.0);
+                if (auto* ex = xml->getChildByName ("EXTRAS"))
+                {
+                    if (auto* sq = ex->getChildByName ("SEQ")) ex->removeChildElement (sq, true);
+                    for (auto* sl : ex->getChildIterator()) { sl->removeAttribute ("seqMode"); sl->removeAttribute ("seqTail"); sl->removeAttribute ("seqSteps"); sl->removeAttribute ("seqTiming"); }
+                }
+                juce::MemoryBlock m4;
+                juce::AudioProcessor::copyXmlToBinary (*xml, m4);
+                proc.setStateInformation (m4.getData(), (int) m4.getSize());
+                bool allAlways = true;
+                for (int s2 = 0; s2 < EfxGridProcessor::kSlots; ++s2) if (proc.getSlotLanes (s2).mode != seq::Always || proc.getSlotLanes (s2).lanes[0].steps != 0) allAlways = false;
+                check (! proc.seqEnabled() && allAlways, "seq: a version 4 session loads with the sequencer off and every lane Always");
+                proc.setStateInformation (mb.getData(), (int) mb.getSize());
+            }
+            // slot remap: move, remove and replace keep each lane with its effect
+            {
+                proc.appendEffect (idOf ("Chorus"));          // slot 2
+                proc.setLaneSteps (2, 0, 0xF0F0u);
+                const auto crush = proc.getSlotLanes (0), delay = proc.getSlotLanes (1), chorus = proc.getSlotLanes (2);
+                proc.moveSlot (2, 0);                          // Chorus, Bitcrusher, Delay
+                bool ok = proc.getSlotLanes (0) == chorus && proc.getSlotLanes (1) == crush && proc.getSlotLanes (2) == delay;
+                proc.clearSlotCompact (1);                     // Chorus, Delay
+                ok = ok && proc.getSlotLanes (1) == delay;
+                proc.loadEffect (0, idOf ("Phaser"));          // replace Chorus: keeps its steps
+                ok = ok && proc.getSlotLanes (0).lanes[0].steps == 0xF0F0u && proc.getSlotLanes (0).tail == seq::Cut;
+                proc.appendEffect (idOf ("Flanger"));          // new slot: empty, Always
+                ok = ok && proc.getSlotLanes (2).mode == seq::Always && proc.getSlotLanes (2).lanes[0].steps == 0u;
+                check (ok, "seq: move / remove / replace keep each lane on its effect; new slots start empty");
+            }
+            // undo: a step edit is one undo step
+            {
+                proc.clearUndo();
+                const auto m0 = proc.laneSteps (1, 0);
+                proc.setLaneSteps (1, 0, m0 ^ 0x1u); proc.undoCheckpoint();
+                proc.undoStep();
+                check (proc.laneSteps (1, 0) == m0, "seq: undo restores a step edit");
+                seq::SceneSettings s3; s3.steps = 7;
+                proc.setSceneSettings (3, s3); proc.undoCheckpoint();
+                proc.undoStep();
+                check (proc.sceneSettings (3).steps == 16, "seq: undo restores scene settings");
+            }
+            proc.setPlayHead (nullptr);
+            proc.setSeqEnabled (false);
+            for (int s2 = proc.chainLength() - 1; s2 >= 0; --s2) proc.clearSlotCompact (s2);
             proc.clearUndo();
         }
 

@@ -3,6 +3,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "dsp/Effects.h"
 #include "MidiLearn.h"
+#include "Sequencer.h"
 
 // ============================================================
 // 16 slots in series. Each slot owns one GridEffect, rebuilt on the message
@@ -21,7 +22,7 @@ class EfxGridProcessor : public juce::AudioProcessor,
 public:
     static constexpr int kSlots = 16;
     static constexpr int kMaxParams = efx::kMaxParams;
-    static constexpr int kStateVersion = 4;   // 4: ADSR (#19) became the Harmonic Resonator
+    static constexpr int kStateVersion = 5;   // 4: ADSR (#19) became the Harmonic Resonator; 5: effect sequencer
     static constexpr int kDataSize = efx::kDataSize;
 
     EfxGridProcessor();
@@ -49,6 +50,30 @@ public:
 
     void getStateInformation (juce::MemoryBlock&) override;
     void setStateInformation (const void*, int) override;
+
+    // ---- effect sequencer (message thread edits; the audio thread reads atomics)
+    // Lanes live with their slot (SlotState::lanes), so moving, removing and
+    // replacing effects, undo and presets carry them along.
+    seq::SlotLanes getSlotLanes (int slot) const;
+    void setSlotLanes (int slot, const seq::SlotLanes&);
+    uint32_t laneSteps (int slot, int scene) const;
+    void setLaneSteps (int slot, int scene, uint32_t mask);
+    void setLaneMode (int slot, int mode);
+    void setLaneTail (int slot, int tail);
+    void setLaneTiming (int slot, int scene, int len, int rate);   // 0 / -1 = the scene's
+    seq::SceneSettings sceneSettings (int scene) const;
+    void setSceneSettings (int scene, const seq::SceneSettings&);
+    bool seqEnabled() const;
+    void setSeqEnabled (bool on);
+    int playingScene() const { return seqPlaying.load(); }
+    int queuedScene() const { return seqQueued.load(); }
+    void requestScene (int scene);             // switches at the end of the pattern while playing
+    bool slotHasTail (int slot) const;         // Ring is offered only for delays / reverbs
+    bool slotGateOpen (int slot) const { return gateUi[(size_t) juce::jlimit (0, kSlots - 1, slot)].load(); }
+    double seqPpq() const { return seqPpqUi.load(); }   // playhead (beats)
+    bool seqRunning() const { return seqRunningUi.load(); }
+    void seqEdited();                          // dirty flag + state generation after a sequencer edit
+    void setLivePad (int slot, bool down) { if (slot >= 0 && slot < kSlots) livePadUi[(size_t) slot].store (down); }
 
     // ---- undo / redo (message thread) ------------------------------------
     // Snapshots of every slot (knobs, mode, mix, routing, shape data, tables /
@@ -155,8 +180,15 @@ private:
         float data[efx::kDataSize] {};
         std::shared_ptr<const efx::Wavetable> table;
         std::shared_ptr<const efx::AudioAsset> asset;
+        seq::SlotLanes lanes;   // the effect sequencer's lanes travel with the slot
     };
-    using Snapshot = std::array<SlotState, kSlots>;
+    struct Snapshot
+    {
+        std::array<SlotState, kSlots> slots;
+        seq::SceneSettings scenes[seq::kScenes];
+        SlotState& operator[] (size_t i) { return slots[i]; }
+        const SlotState& operator[] (size_t i) const { return slots[i]; }
+    };
     Snapshot takeSnapshot() const;
     void applySnapshot (const Snapshot&);
     static bool sameSlot (const SlotState&, const SlotState&);
@@ -199,6 +231,28 @@ private:
     std::atomic<bool> anyPending { false };
     std::atomic<bool> scActive { false };
     std::atomic<float> macroDepth[kSlots][kMaxParams] {};
+
+    // effect sequencer storage (lanes per slot and scene, scene timing)
+    std::atomic<uint32_t> laneStepsA[kSlots][seq::kScenes] {};
+    std::atomic<int> laneLenA[kSlots][seq::kScenes] {}, laneRateA[kSlots][seq::kScenes] {};
+    std::atomic<int> laneModeA[kSlots] {}, laneTailA[kSlots] {};
+    std::atomic<int> sceneStepsA[seq::kScenes] {}, sceneRateA[seq::kScenes] {};
+    std::atomic<float> sceneSwingA[seq::kScenes] {};
+    std::atomic<float> seqFadeMs { 3.0f };
+    std::atomic<int> seqPlaying { 0 }, seqQueued { -1 };
+    std::array<std::atomic<bool>, kSlots> gateUi {}, livePadUi {};
+    std::atomic<double> seqPpqUi { 0.0 };
+    std::atomic<bool> seqRunningUi { false };
+    juce::AudioParameterBool* seqOnParam = nullptr;
+    juce::AudioParameterChoice* seqSceneParam = nullptr;
+    // audio thread only
+    bool gateState[kSlots] {};
+    const efx::GridEffect* gateFx[kSlots] {};
+    int lastSceneParam = -1;
+    bool livePad[kSlots] {};
+    efx::SlotInput::GateEvent gateEv[kSlots][seq::kMaxEvents] {};
+    int gateEvN[kSlots] {};
+    void scheduleSequencer (double ppq, double beatsPerSample, int n, bool hostPlaying, const juce::MidiBuffer& midi);
     double currentSampleRate = 44100.0;
     int currentBlock = 512;
     double freeRunPpq = 0.0;

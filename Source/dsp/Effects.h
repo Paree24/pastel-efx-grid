@@ -225,6 +225,10 @@ public:
     virtual void prepare (double sampleRate) = 0;           // allocate everything here
     virtual void reset() = 0;
     virtual void process (float* L, float* R, int n, const FxContext& c) = 0;   // n <= kChunk
+    // the effect sequencer turned this slot on: a run of runBeats starts,
+    // phaseBeats of it already gone (a host jump into the middle). Time
+    // effects (stutter, reverse, tape stop ...) restart from it; others ignore it.
+    virtual void trigger (double /*runBeats*/, double /*phaseBeats*/, double /*bpm*/) {}
     // message-thread hook (~4 Hz) for work that may allocate (e.g. IR rebuilds)
     virtual void idle (const float* /*phys*/, int /*mode*/) {}
     // audio-free description for the visualisers, evaluated on the UI thread
@@ -266,6 +270,13 @@ struct SlotInput
     const float* scR = nullptr;
     const float* data = nullptr;        // kDataSize shape values (nullptr = effect defaults)
     int dataGen = 0;
+    // effect sequencer: gate changes inside this block (sample offsets ascending).
+    // The slot follows them; without events it stays as it was (open by default).
+    struct GateEvent { int offset = 0; bool on = false; double runBeats = 0.0, phaseBeats = 0.0; };
+    const GateEvent* gateEvents = nullptr;
+    int numGateEvents = 0;
+    bool gateRing = false;              // Ring: gate the input, tails ring on; Cut: gate the wet signal
+    float gateFadeMs = 3.0f;
 };
 
 class GridEffect
@@ -282,6 +293,7 @@ public:
     void idle();                                       // message thread
 
     int getId() const { return id; }
+    bool gateOpen() const { return gateTo > 0.5f; }   // the sequencer has this slot on (UI light)
     const EffectDef& def() const { return *d; }
     double sampleRate() const { return sr; }
 
@@ -319,6 +331,10 @@ private:
     bool primed = false;
     float smoothN[kMaxParams] {}, phys[kMaxParams] {};
     float mixS = 1.0f, activeS = 1.0f;
+    // effect sequencer gate: raised-cosine ramp from gateFrom to gateTo
+    float gateS = 1.0f, gateFrom = 1.0f, gateTo = 1.0f;
+    int gatePos = 0, gateLen = 0;
+    float gateBuf[kChunk] {};
     float smoothCoef = 0.2f;
     double freePpq = 0.0;
     float dryL[kChunk] {}, dryR[kChunk] {};
