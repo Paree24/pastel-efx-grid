@@ -115,6 +115,7 @@ public:
     // ---- presets (message thread) ----------------------------------------
     juce::String presetName { "Init" };
     int presetIndex = -1;                     // position in the browser's list (-1 = edited / unknown)
+    bool keepSequence = false;                // browser: loading a preset keeps the sequencer's patterns
     bool loadPresetXml (const juce::XmlElement&);   // one undo step
     std::unique_ptr<juce::XmlElement> presetXml();  // the full state, for saving
     void applyChain (const std::vector<std::pair<int, std::vector<std::pair<juce::String, float>>>>& chain,

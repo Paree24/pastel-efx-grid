@@ -44,6 +44,7 @@ private:
     juce::ListBox list { "presets", this };
     juce::TextButton closeBtn { "x" }, saveBtn { "SAVE" }, delBtn { "DELETE" }, folderBtn { "FOLDER" };
     juce::TextButton factoryTab { "FACTORY" }, userTab { "USER" };
+    juce::ToggleButton keepSeq { "Keep sequence" };
     std::vector<presets::Entry> rows;
     int activeBank = 0;
     bool overwriteArmed = false, loadingRow = false;

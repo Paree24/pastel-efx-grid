@@ -32,6 +32,11 @@ PresetBrowser::PresetBrowser (EfxGridProcessor& p) : proc (p)
         addAndMakeVisible (*b);
     }
     refreshBankButtons();
+    keepSeq.setTooltip ("Load presets under the current sequencer patterns (only the effects change)");
+    keepSeq.setColour (juce::ToggleButton::textColourId, PastelColors::textDim);
+    keepSeq.setColour (juce::ToggleButton::tickColourId, PastelColors::accent);
+    keepSeq.onClick = [this] { proc.keepSequence = keepSeq.getToggleState(); };
+    addAndMakeVisible (keepSeq);
 
     list.setColour (juce::ListBox::backgroundColourId, juce::Colours::transparentBlack);
     list.setRowHeight (28);
@@ -106,6 +111,7 @@ void PresetBrowser::visibilityChanged()
     nameBox.setText (generated ? juce::String() : n, false);
     setOverwriteArmed (false);
     activeBank = proc.presetIndex >= presets::numFactory() ? 1 : 0;
+    keepSeq.setToggleState (proc.keepSequence, juce::dontSendNotification);
     refreshBankButtons();
     rebuildRows();
     search.grabKeyboardFocus();
@@ -213,6 +219,7 @@ void PresetBrowser::resized()
     search.setBounds (panel.getX() + 16, panel.getY() + 44, panel.getWidth() - 32, 28);
     factoryTab.setBounds (panel.getX() + 12, panel.getY() + 78, 96, 24);
     userTab.setBounds (panel.getX() + 112, panel.getY() + 78, 80, 24);
+    keepSeq.setBounds (panel.getRight() - 16 - 140, panel.getY() + 78, 140, 24);
     list.setBounds (panel.getX() + 12, panel.getY() + 108, panel.getWidth() - 24, panel.getHeight() - 108 - 82);
     auto bottom = juce::Rectangle<int> (panel.getX() + 16, panel.getBottom() - 46, panel.getWidth() - 32, 30);
     folderBtn.setBounds (bottom.removeFromRight (80)); bottom.removeFromRight (8);

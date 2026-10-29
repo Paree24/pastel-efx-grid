@@ -1,5 +1,6 @@
 #include "Presets.h"
 #include "PluginProcessor.h"
+#include "Sequencer.h"
 #include "dsp/Scales.h"
 
 namespace presets
@@ -7,8 +8,19 @@ namespace presets
 namespace
 {
     // one effect of a factory chain: physical values by control name, mode, mix (-1 = default)
-    struct Fx { const char* name; std::vector<std::pair<juce::String, float>> set; int mode = 0; float mix = -1.0f; };
-    struct Factory { const char* name; const char* tag; std::vector<Fx> chain; };
+    // lane: -1 = Always (no pattern), else Cut / Ring with these steps (scene 1)
+    struct Fx { const char* name; std::vector<std::pair<juce::String, float>> set; int mode = 0; float mix = -1.0f;
+                int lane = -1; uint32_t steps = 0; int len = 0; };
+    // seqSteps > 0: a sequencer preset (scene 1 timing; the sequencer turns on)
+    struct Factory { const char* name; const char* tag; std::vector<Fx> chain; int seqSteps = 0; int seqRate = seq::kRate16th; float swing = 0.0f; };
+    constexpr int kCut = seq::Cut, kRing = seq::Ring;
+    // steps from a 16- or 32-character pattern, x = on
+    uint32_t pat (const char* p)
+    {
+        uint32_t m = 0;
+        for (int i = 0; p[i] != 0 && i < seq::kMaxSteps; ++i) if (p[i] == 'x') m |= 1u << (uint32_t) i;
+        return m;
+    }
 
     float scaleIdx (const char* n)
     {
@@ -195,6 +207,34 @@ namespace
                 { "Click Remover", { { "Sens", 0.4f } } } } },
             { "Cleanup: Noise", "Repair", {
                 { "Denoiser", { { "Reduce", 8.0f } } } } },
+
+            // ---- sequencer: patterns that switch effects in time with the host
+            { "Seq: Stutter Fills", "Sequencer", {
+                { "Stutter", { { "Div", 10.0f }, { "Repeats", 8.0f }, { "Decay", -1.5f } }, 0, -1.0f, kCut, pat ("..............xx..........xx.xxxx") },
+                { "Multimode Filter", { { "Cutoff", 9000.0f }, { "Reso", 0.15f } } },
+                { "Plate Reverb", { { "Decay", 1.6f } }, 0, 0.25f, kRing, pat ("..............x...............x.") } }, 32, seq::kRate16th, 0.0f },
+            { "Seq: Tape Stop Drops", "Sequencer", {
+                { "Tape Stop", { { "Fit", 1.0f }, { "Darken", 0.6f } }, 0, -1.0f, kCut, pat ("............................xxxx") },
+                { "Saturation", { { "Drive", 2.0f } }, 1 } }, 32, seq::kRate16th, 0.0f },
+            { "Seq: Reverse Swells", "Sequencer", {
+                { "Reverse", { { "Sync", 0.0f }, { "Fade", 0.2f } }, 0, -1.0f, kCut, pat ("............xxxx............xxxx") },
+                { "Plate Reverb", { { "Decay", 2.5f } }, 0, 0.3f, kRing, pat ("............xxxx............xxxx") } }, 32, seq::kRate16th, 0.0f },
+            { "Seq: Delay Throws", "Sequencer", {
+                { "Ping-Pong Delay", { { "Feedback", 0.5f } }, 0, 0.45f, kRing, pat ("......x.......x.......x.....x.x.") },
+                { "Room Reverb", { { "Decay", 0.8f } }, 0, 0.15f } }, 32, seq::kRate16th, 0.0f },
+            { "Seq: Filter Chops", "Sequencer", {
+                { "Multimode Filter", { { "Cutoff", 1200.0f }, { "Reso", 0.45f } }, 2, -1.0f, kCut, pat ("x.x.xx.x..x.xx.x") },
+                { "Bitcrusher", { { "Bits", 6.0f } }, 0, 0.6f, kCut, pat ("x.x.."), 5 } }, 16, seq::kRate16th, 0.12f },
+            { "Seq: Gated Crush", "Sequencer", {
+                { "Saturation", { { "Drive", 2.0f } }, 1 },
+                { "Bitcrusher", { { "Bits", 5.0f }, { "Rate", 6000.0f } }, 0, 0.7f, kCut, seq::euclid (16, 5, 0) } }, 16, seq::kRate16th, 0.0f },
+            { "Seq: Glitch Run", "Sequencer", {
+                { "Buffer Shuffler", { { "Chance", 1.0f } }, 0, -1.0f, kCut, pat ("........xxxx....") },
+                { "Stutter", { { "Div", 13.0f }, { "Repeats", 16.0f } }, 0, -1.0f, kCut, pat ("..............xx") },
+                { "Reverse", { { "Sync", 1.0f }, { "Div", 10.0f } }, 0, -1.0f, kCut, pat ("....xx..........") } }, 16, seq::kRate16th, 0.0f },
+            { "Seq: Space Gaps", "Sequencer", {
+                { "Shimmer Reverb", { { "Decay", 5.0f }, { "Shimmer", 0.3f } }, 0, 0.4f, kRing, pat ("..x...x...x...x.") },
+                { "Stereo Width", { { "Width", 1.2f } } } }, 16, 9, 0.0f },
         };
         return f;
     }
@@ -223,7 +263,30 @@ bool applyFactory (EfxGridProcessor& proc, int i)
         modes.push_back (fx.mode);
         mixes.push_back (fx.mix);
     }
+    EfxGridProcessor::UndoBatch batch (proc);   // the chain and its patterns: one undo step
     proc.applyChain (chain, modes, mixes);
+    if (f.seqSteps > 0)
+    {
+        seq::SceneSettings ss; ss.steps = f.seqSteps; ss.rate = f.seqRate; ss.swing = f.swing;
+        proc.setSceneSettings (0, ss);
+        int slot = 0;
+        for (const auto& fx : f.chain)
+        {
+            if (efx::idForName (fx.name) <= 0) continue;
+            auto ln = proc.getSlotLanes (slot);
+            if (fx.lane >= 0)
+            {
+                ln.mode = seq::Sequenced;
+                ln.tail = fx.lane;
+                ln.lanes[0].steps = fx.steps;
+                ln.lanes[0].len = fx.len;
+            }
+            proc.setSlotLanes (slot, ln);
+            ++slot;
+        }
+        proc.requestScene (0);
+        proc.setSeqEnabled (true);
+    }
     proc.presetName = f.name;
     proc.presetIndex = i;
     return true;
@@ -295,7 +358,45 @@ std::vector<Entry> allEntries()
     return all;
 }
 
+// Keep sequence: a preset changes the effects under the existing pattern
+struct SeqKeep
+{
+    seq::SlotLanes lanes[EfxGridProcessor::kSlots];
+    seq::SceneSettings scenes[seq::kScenes];
+    bool on = false;
+    void take (const EfxGridProcessor& p)
+    {
+        for (int s = 0; s < EfxGridProcessor::kSlots; ++s) lanes[s] = p.getSlotLanes (s);
+        for (int sc = 0; sc < seq::kScenes; ++sc) scenes[sc] = p.sceneSettings (sc);
+        on = p.seqEnabled();
+    }
+    void restore (EfxGridProcessor& p) const
+    {
+        for (int s = 0; s < EfxGridProcessor::kSlots; ++s)
+        {
+            auto ln = lanes[s];
+            if (! p.slotHasTail (s)) ln.tail = seq::Cut;
+            p.setSlotLanes (s, ln);
+        }
+        for (int sc = 0; sc < seq::kScenes; ++sc) p.setSceneSettings (sc, scenes[sc]);
+        p.setSeqEnabled (on);
+    }
+};
+
+static bool loadEntryRaw (const Entry& e, EfxGridProcessor& proc);
+
 bool loadEntry (const Entry& e, EfxGridProcessor& proc)
+{
+    if (! proc.keepSequence) return loadEntryRaw (e, proc);
+    EfxGridProcessor::UndoBatch batch (proc);
+    SeqKeep keep;
+    keep.take (proc);
+    const bool ok = loadEntryRaw (e, proc);
+    keep.restore (proc);
+    return ok;
+}
+
+static bool loadEntryRaw (const Entry& e, EfxGridProcessor& proc)
 {
     if (! e.isUser) return applyFactory (proc, e.index);
     if (! loadUser (e.file, proc)) return false;

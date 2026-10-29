@@ -721,8 +721,11 @@ int main (int argc, char** argv)
                 spreadDb = win.empty() ? 0.0 : win[(size_t) (win.size() * 95 / 100)] - win[win.size() / 2];
             };
             int badPresets = 0;
+            TestPlayHead presetHead;   // a running host: sequencer presets play their patterns
+            proc.setPlayHead (&presetHead);
             for (int i = 1; i < presets::numFactory(); ++i)
             {
+                presetHead.ppq = 0.0;
                 presets::applyFactory (proc, i);
                 proc.reloadSlotsNow();
                 const auto tag = presets::factoryTag (i);
@@ -740,6 +743,7 @@ int main (int argc, char** argv)
                         if (b >= 50) in.push_back (v);
                     }
                     proc.processBlock (buf, midi);
+                    presetHead.ppq += 512.0 * presetHead.bpm / (60.0 * 48000.0);
                     if (b >= 50) for (int k = 0; k < 512; ++k) out.push_back (buf.getSample (0, k));
                 }
                 bool finite = true;
@@ -754,6 +758,7 @@ int main (int argc, char** argv)
                 std::printf ("  %s %-24s level %+5.1f dB   peak %+5.1f dBFS   dynamics %+5.1f dB\n",
                              ok ? "ok  " : "FAIL", presets::factoryName (i).toRawUTF8(), dLevel, po, -squash);
             }
+            proc.setPlayHead (nullptr);
             check (badPresets == 0, "factory presets: levels within 6 dB, no clipping, dynamics kept");
             for (int s2 = proc.chainLength() - 1; s2 >= 0; --s2) proc.clearSlotCompact (s2);
             proc.clearUndo();
@@ -799,6 +804,35 @@ int main (int argc, char** argv)
             check (proc.chainLength() >= 3 && proc.chainLength() <= 5 && noMeters, "random new chain: 3-5 effects, no meters");
             proc.reloadSlotsNow(); run (8);
             for (int s = proc.chainLength() - 1; s >= 0; --s) proc.clearSlotCompact (s);
+            proc.clearUndo();
+        }
+
+        // sequencer presets and Keep sequence
+        {
+            auto fi = [] (const char* n) { for (int i = 0; i < presets::numFactory(); ++i) if (presets::factoryName (i) == n) return i; return -1; };
+            proc.setSeqEnabled (false);
+            proc.clearUndo();
+            presets::applyFactory (proc, fi ("Seq: Stutter Fills"));
+            const auto st = proc.getSlotLanes (0), flt = proc.getSlotLanes (1);
+            check (proc.seqEnabled() && proc.sceneSettings (0).steps == 32 && st.mode == seq::Sequenced && st.lanes[0].steps == ((1u << 14) | (1u << 15) | (1u << 26) | (1u << 27) | (1u << 29) | (1u << 30) | (1u << 31))
+                   && flt.mode == seq::Always, "presets: Seq: Stutter Fills loads its pattern and turns the sequencer on");
+            proc.undoStep();
+            check (! proc.seqEnabled() || proc.getSlotLanes (0).mode != seq::Sequenced || proc.getSlotEffectId (0) != idOf ("Stutter"), "presets: a sequencer preset is one undo step");
+            proc.redoStep();
+            // Keep sequence: a plain preset loads under the existing pattern
+            const auto lanes0 = proc.getSlotLanes (0);
+            const auto scene0 = proc.sceneSettings (0);
+            proc.keepSequence = true;
+            presets::loadEntry ({ false, fi ("Mix Bus Glue"), "Mix Bus Glue", "", {} }, proc);
+            const bool kept = proc.getSlotLanes (0).lanes[0].steps == lanes0.lanes[0].steps && proc.getSlotLanes (0).mode == lanes0.mode
+                              && proc.sceneSettings (0) == scene0 && proc.seqEnabled() && proc.getSlotEffectId (0) == idOf ("Compressor");
+            proc.keepSequence = false;
+            presets::loadEntry ({ false, fi ("Mix Bus Glue"), "Mix Bus Glue", "", {} }, proc);
+            const bool reset = proc.getSlotLanes (0).mode == seq::Always && proc.getSlotLanes (0).lanes[0].steps == 0u;
+            check (kept && reset, "presets: Keep sequence keeps the patterns; off, a plain preset resets the lanes");
+            for (int sc = 0; sc < seq::kScenes; ++sc) proc.setSceneSettings (sc, seq::SceneSettings {});
+            proc.setSeqEnabled (false);
+            for (int s2 = proc.chainLength() - 1; s2 >= 0; --s2) proc.clearSlotCompact (s2);
             proc.clearUndo();
         }
 

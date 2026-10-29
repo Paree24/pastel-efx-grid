@@ -1,12 +1,12 @@
 # Pastel EFX Grid
 
 A JUCE audio plugin (VST3 + Standalone) that presents a **4×4 grid of 16 effect
-slots**. Each slot can load any of **89 effects**, in the dark/pastel theme from
-the original HTML/SVG mockup (`grid.svg`, `grid.html`, `all-effects.html`).
+slots**. Each slot can load any of **91 effects**, in a dark/pastel theme.
 
 The 16 slots are chained in series, left-to-right, top-to-bottom. Every slot has
-an effect, a mode, up to eight controls of its own, a user-routable macro, a
-dry/wet mix and a click-free bypass.
+an effect, a mode, up to sixteen controls of its own, a user-routable macro, a
+dry/wet mix and a click-free bypass. A **step sequencer** switches the slots on
+and off in time with the host.
 
 Effects **fill the slots in order**: adding an effect appends it to the first
 free slot, so the chain is always packed with no gaps. Removing a slot shifts the
@@ -35,6 +35,47 @@ carry the whole slot state (values, mode, mix, bypass, macro routing, wavetable)
 - **Sidechain**: the plugin has an optional stereo sidechain bus. *Sidechain
   Comp*, *Ducker* and *Vocoder* use it in their *Ext* mode (falling back to the
   input when nothing is connected).
+
+## Effect sequencer
+
+The **SEQUENCER** tab (beside **GRID** in the header) decides *when* each effect
+plays. Every slot in the chain gets a lane of up to 32 on/off steps; lanes are
+independent, so several effects can play at once, always in chain order.
+
+- **Clock**: the host's. Steps come straight from the host position, so lanes
+  never drift and line up again at the song start. When the host stops,
+  sequenced lanes pass dry and *Always* lanes keep playing.
+- **Rhythm**: per scene, *Steps* (1–32), *Rate* (1/1 to 1/64, each also dotted
+  or triplet) and *Swing* (0–75%, delays every second step). A lane can have its
+  own steps and rate (right-click its header) for polyrhythms, shown as a tag
+  such as `5 · 1/16`.
+- **Lane switches**: *Always* plays the slot all the time (as without the
+  sequencer; new slots start here); *Seq* plays it only on its on steps.
+  *Cut* fades the effect out on off steps (dry, bit-exact); *Ring* (delays and
+  reverbs only, their default) closes the effect's input so tails ring on.
+- **Editing**: click a step to toggle it, drag to paint (the first step decides
+  on or off), Alt-drag to rotate a lane, drag a lane header onto another lane to
+  copy it, right-click a header for clear / fill / euclidean / lane steps /
+  lane rate. Dice gives a lane (or the whole scene) new steps that favour the
+  beat; Mutate flips a few. All of it is undoable.
+- **Scenes**: 16 per preset. Click a pad to switch; while the host plays the
+  switch waits for the end of the pattern (or the next beat / immediately: see
+  *MIDI / FADE*). Right-click a pad to copy, paste or clear it.
+- **Time effects** start with their lane: *Stutter* captures one Div and repeats
+  it for the run, *Reverse* plays the audio just before the run backwards, *Tape
+  Stop* brakes across the run (*Fit* makes the stop take exactly the run),
+  *Buffer Shuffler* restarts its slice order and *Time Stretch* its loop.
+- **MIDI** (enable MIDI to the plugin in your host): notes C1–D#2 select scenes
+  1–16; C3–D#4 are live pads that hold slot 1–16's lane open while held. Both
+  ranges can be moved in *MIDI / FADE*, which also sets the gate fade (1–10 ms).
+- **Automation**: `seq_on` and `seq_scene` (scene 1–16), after every slot
+  parameter, so existing sessions keep their parameter order.
+- **Presets**: the *Sequencer* factory presets ship with patterns. *Keep
+  sequence* in the browser loads a preset under the current patterns.
+- **State**: version 5. Older sessions load with the sequencer off and every
+  lane on *Always*, so they sound as before. Sequenced slots keep running while
+  off (so stutters and reverses have history), which costs the same CPU as an
+  unsequenced slot.
 
 ## Building
 
@@ -127,17 +168,18 @@ For slot `N` (0-based IDs, shown to hosts as `S01 …` to `S16 …`):
 
 | id               | type   | notes                                         |
 |------------------|--------|-----------------------------------------------|
-| `sN_fx`          | choice | 0 = Empty, 1..89 = effect                     |
+| `sN_fx`          | choice | 0 = Empty, 1..91 = effect                     |
 | `sN_mode`        | choice | 4 entries, clamped to the effect's mode count |
-| `sN_p0`..`sN_p7` | float  | 0..1, the effect's controls (unused ones idle) |
+| `sN_p0`..`sN_p15` | float | 0..1, the effect's controls (unused ones idle) |
 | `sN_macro`       | float  | 0..1                                          |
 | `sN_mix`         | float  | dry/wet, 0..1                                 |
 | `sN_bypass`      | bool   | faded over ~10 ms                             |
 
-Hosts see each knob's value formatted for the effect in that slot. Macro routing
-and wavetables are not automatable; they are saved in the plugin state.
-Sessions from the previous version keep their effects and mix; their control
-values are reset to the new defaults, because the control layouts changed.
+After the slots come `seq_on` (bool) and `seq_scene` (choice, 1–16).
+
+Hosts see each knob's value formatted for the effect in that slot. Macro
+routing, shape data, wavetables, IRs and the sequencer's patterns are not
+automatable; they are saved in the plugin state.
 
 Effect instances are built on the message thread when `sN_fx` changes; the old
 instance is kept alive ~1 s before being freed so the audio thread never touches
