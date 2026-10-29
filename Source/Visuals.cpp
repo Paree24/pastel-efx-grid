@@ -693,6 +693,78 @@ namespace
         }
     }
 
+    // Humanizer: Steps mode shows the per-step levels of the loop (from the
+    // seed, as the effect plays them); other modes the recent gain history
+    void drawHumanizer (juce::Graphics& g, juce::Rectangle<float> r, const State& s)
+    {
+        grid (g, r, 8, 4);
+        const float range = juce::jmax (1.0f, s.P (0) + s.P (1));
+        auto yOf = [&] (float db) { return r.getCentreY() - juce::jlimit (-1.0f, 1.0f, db / range) * r.getHeight() * 0.45f; };
+        g.setColour (kAxis);
+        g.fillRect (r.getX(), r.getCentreY(), r.getWidth(), 1.0f);
+        if (s.mode == 1)
+        {
+            static constexpr int kBars[4] = { 0, 1, 2, 4 };
+            const auto& dv = s.d->p[4];
+            const double divB = dv.choices != nullptr ? efx::divisionBeats (dv.choices[juce::jlimit (0, juce::jmax (0, dv.numChoices - 1), s.I (4))]) : 1.0;
+            const int bars = kBars[juce::jlimit (0, 3, s.I (5))];
+            const int n = juce::jlimit (1, 32, bars > 0 ? (int) std::llround (bars * 4.0 / divB) : (int) std::llround (4.0 / divB));
+            const float bw = r.getWidth() / (float) n;
+            const int seed = s.I (7);
+            for (int k = 0; k < n; ++k)
+            {
+                const float db = s.P (0) * efx::humanizeHash (seed, k);
+                const float y0 = r.getCentreY(), y1 = yOf (db);
+                g.setColour (s.accent.withAlpha (bars > 0 ? 0.85f : 0.4f));
+                g.fillRect (r.getX() + bw * (float) k + 1.0f, juce::jmin (y0, y1), juce::jmax (1.0f, bw - 2.0f), juce::jmax (1.0f, std::abs (y1 - y0)));
+            }
+        }
+        if (s.fx == nullptr) return;
+        constexpr int kHist = 48;
+        const int head = juce::jlimit (0, kHist - 1, (int) s.m (1));
+        juce::Path p;
+        for (int i = 0; i < kHist; ++i)
+        {
+            const float x = r.getX() + r.getWidth() * (float) i / (float) (kHist - 1);
+            const float y = yOf (s.m (2 + (head + i) % kHist));
+            if (i == 0) p.startNewSubPath (x, y); else p.lineTo (x, y);
+        }
+        g.setColour (s.mode == 1 ? kText.withAlpha (0.8f) : s.accent);
+        g.strokePath (p, juce::PathStrokeType (1.5f));
+        if (s.detailed) label (g, r, "Range " + juce::String (range, 1) + " dB", juce::Justification::topLeft, 11.0f, kText);
+    }
+
+    // Talkbox: the voice's vocal-tract curve (formants) as it speaks
+    void drawTalkbox (juce::Graphics& g, juce::Rectangle<float> r, const State& s)
+    {
+        grid (g, r, 8, 4);
+        if (s.fx != nullptr && s.m (1) < 0.5f)
+        {
+            label (g, r, "Route a voice to the sidechain", juce::Justification::centred, s.detailed ? 13.0f : 11.0f, kDim);
+            return;
+        }
+        if (s.fx == nullptr) return;
+        float top = -200.0f;
+        for (int b = 0; b < VizTaps::kSpec; ++b) top = juce::jmax (top, s.fx->taps().spec[(size_t) b].load (std::memory_order_relaxed));
+        if (top < -150.0f) return;
+        const float lo = top - 48.0f;
+        juce::Path p, fill;
+        for (int b = 0; b < VizTaps::kSpec; ++b)
+        {
+            const float x = r.getX() + r.getWidth() * (float) b / (float) (VizTaps::kSpec - 1);
+            const float y = yOfDb (r.reduced (0.0f, 4.0f), s.fx->taps().spec[(size_t) b].load (std::memory_order_relaxed), lo, top);
+            if (b == 0) { p.startNewSubPath (x, y); fill.startNewSubPath (x, r.getBottom()); }
+            else p.lineTo (x, y);
+            fill.lineTo (x, y);
+        }
+        fill.lineTo (r.getRight(), r.getBottom()); fill.closeSubPath();
+        const bool open = s.m (0) > s.P (4);
+        g.setColour (s.accent.withAlpha (open ? 0.25f : 0.08f));
+        g.fillPath (fill);
+        g.setColour (open ? s.accent : kDim);
+        g.strokePath (p, juce::PathStrokeType (1.5f));
+    }
+
     void drawHarmRes (juce::Graphics& g, juce::Rectangle<float> r, const State& s)
     {
         float hz[harmres::kMaxRes], gain[harmres::kMaxRes];
@@ -1460,6 +1532,8 @@ void drawEffectVisual (juce::Graphics& g, juce::Rectangle<float> full, const Sta
         // volume
         case VizHarmRes:   drawHarmRes (g, r, s); break;
         case VizMbGate:    drawMbGate (g, r, s); break;
+        case VizHumanizer: drawHumanizer (g, r, s); break;
+        case VizTalkbox:   drawTalkbox (g, r, s); break;
         case VizTransient: drawTransient (g, r, s); break;
         case VizDuck:      drawDucker (g, r, s); break;
         case VizTrance:
@@ -1582,6 +1656,8 @@ juce::String readoutTag (const State& s)
             return juce::String (closed) + " / 5 closed";
         }
         case VizHarmRes:   return harmres::setName (s.p, s.mode);
+        case VizHumanizer: return (m (0) >= 0.0f ? "+" : "") + juce::String (m (0), 1) + " dB";
+        case VizTalkbox:   return m (1) < 0.5f ? juce::String ("No voice") : (m (0) > s.P (4) ? juce::String ("Talking") : juce::String ("Closed"));
         case VizTrance:    return "Step " + juce::String ((int) m (1) + 1);
         case VizMultimode: case VizSvf: case VizLadder: case VizVintage: return hz (m (0));
         case VizWavetable: return (s.table != nullptr ? s.table->name : juce::String ("Built-in")) + " " + juce::String (juce::roundToInt (m (0) * 100.0f)) + "%";

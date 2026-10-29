@@ -559,6 +559,98 @@ static int runSignalTests()
             expect ("multiband gate: Ext, silent key keeps band 4 closed (dB, <= -40)", (float) juce::jmax (-40.0, dShut), -40.0f, 0.01f);
         }
     }
+    // ---- Talkbox: the voice's formants on the synth's pitch
+    {
+        const int id = idForName ("Talkbox");
+        const auto& d = *defForId (id);
+        // a vowel: a 120 Hz pulse through two formant resonators
+        auto vowel = [&] (double f1, double f2)
+        {
+            std::vector<float> v (N);
+            Biquad r1, r2; r1.setBandPass ((float) f1, 8.0f, kSr); r2.setBandPass ((float) f2, 10.0f, kSr);
+            const int period = (int) (kSr / 120.0);
+            for (size_t i = 0; i < N; ++i)
+            {
+                const float pulse = (i % (size_t) period) == 0 ? 1.0f : 0.0f;
+                v[i] = 0.6f * r1.process (pulse) + 0.4f * r2.process (pulse);
+            }
+            float pk = 1e-9f; for (float x : v) pk = std::max (pk, std::abs (x));
+            for (auto& x : v) x *= 0.3f / pk;
+            return v;
+        };
+        std::vector<float> saw (N, 0.0f);
+        for (size_t i = 0; i < N; ++i)
+            for (int h = 1; h * 220.0 < 8000.0; ++h) saw[i] += (float) (0.25 / h * sine (220.0 * h, i));
+        auto talk = [&] (const std::vector<float>& carrier, const std::vector<float>* voice)
+        {
+            GridEffect fx (id);
+            fx.prepare (kSr, 512);
+            Run r = defaults (d);
+            std::vector<float> out (N), L (512), R (512), sl (512), sr2 (512);
+            for (size_t off = 0; off < N; off += 512)
+            {
+                const int n = (int) std::min<size_t> (512, N - off);
+                for (int i = 0; i < n; ++i)
+                {
+                    L[(size_t) i] = R[(size_t) i] = carrier[off + (size_t) i];
+                    sl[(size_t) i] = sr2[(size_t) i] = voice != nullptr ? (*voice)[off + (size_t) i] : 0.0f;
+                }
+                SlotInput si; si.norm = r.norm; si.macroDepth = r.depth; si.mix = 1.0f; si.bpm = 120.0;
+                if (voice != nullptr) { si.scL = sl.data(); si.scR = sr2.data(); }
+                fx.process (L.data(), R.data(), n, si);
+                for (int i = 0; i < n; ++i) out[off + (size_t) i] = L[(size_t) i];
+            }
+            return out;
+        };
+        const auto vA = vowel (700.0, 1220.0), vI = vowel (300.0, 2300.0);
+        const auto oA = talk (saw, &vA), oI = talk (saw, &vI);
+        auto band = [&] (const std::vector<float>& x, float lo, float hi) { return bandDb (x, lo, hi, N / 2, N); };
+        const double tiltA = band (oA, 600, 850) - band (oA, 250, 350), tiltI = band (oI, 600, 850) - band (oI, 250, 350);
+        expect ("talkbox: /a/ vs /i/: F1 region 700 Hz over 300 Hz differs (dB, >= 6)", (float) std::min (6.0, tiltA - tiltI), 6.0f, 0.01f);
+        expect ("talkbox: /i/ has more 2.3 kHz than /a/ (dB, >= 6)", (float) std::min (6.0, band (oI, 2100, 2500) - band (oA, 2100, 2500)), 6.0f, 0.01f);
+        expect ("talkbox: the synth's pitch (220 Hz) comes through, not the voice's 120 Hz (dB, >= 20)",
+                (float) std::min (20.0, toneDb (oA, 660.0, N / 2, N) - toneDb (oA, 120.0, N / 2, N)), 20.0f, 0.01f);
+        const std::vector<float> silent (N, 0.0f);
+        const auto oS = talk (saw, &silent);
+        float pk = 0.0f; for (size_t i = N / 2; i < N; ++i) pk = std::max (pk, std::abs (oS[i]));
+        expect ("talkbox: silent voice -> silent output (dBFS, <= -60)", std::max (-60.0f, gainToDb (pk)), -60.0f, 0.01f);
+        const auto oN = talk (saw, nullptr);
+        float diff = 0.0f; for (size_t i = 0; i < N; ++i) diff = std::max (diff, std::abs (oN[i] - saw[i]));
+        expect ("talkbox: no sidechain -> the input passes (max err)", diff, 0.0f, 1.0e-6f);
+    }
+    // ---- Humanizer: per-step levels repeat with the bar, the average stays put
+    {
+        const int id = idForName ("Humanizer");
+        std::vector<float> in (N);
+        for (size_t i = 0; i < N; ++i) in[i] = (float) (0.3 * sine (330.0, i));
+        // Steps, 1/8 (0.25 s), Repeat 1 bar (2 s): level per step in bar 1 vs bar 2
+        const auto out = runSignal (id, { { "Amount", 3.0f }, { "Drift", 0.0f }, { "Div", 7.0f }, { "Repeat", 1.0f }, { "Smooth", 2.0f } }, in, 1);
+        auto stepDb = [&] (int k) { const size_t a0 = (size_t) ((k * 0.25 + 0.05) * kSr), a1 = (size_t) ((k * 0.25 + 0.2) * kSr);
+                                    return bandDb (out, 100, 2000, a0, a1) - bandDb (in, 100, 2000, a0, a1); };
+        double worst = 0.0, spread = 0.0;
+        for (int k = 0; k < 8; ++k)
+        {
+            worst = std::max (worst, std::abs (stepDb (k) - stepDb (k + 8)));
+            spread = std::max (spread, std::abs (stepDb (k)));
+        }
+        expect ("humanizer: Steps + Repeat 1 bar: bar 2 repeats bar 1 (max diff dB)", (float) worst, 0.0f, 0.1f);
+        expect ("humanizer: ... with levels spread up to Amount (dB, >= 1)", (float) std::min (1.0, spread), 1.0f, 0.01f);
+        // Free + drift: the long-term average stays at 0 dB
+        const auto freeOut = runSignal (id, { { "Amount", 3.0f }, { "Drift", 3.0f }, { "Rate", 2.0f } }, in, 2);
+        expect ("humanizer: average level stays put (dB)", (float) (bandDb (freeOut, 100, 2000, 0, N) - bandDb (in, 100, 2000, 0, N)), 0.0f, 0.5f);
+        // Hits: each hit gets its own level
+        std::vector<float> hits (N);
+        for (size_t i = 0; i < N; ++i) { const double t = std::fmod ((double) i / kSr, 0.25); hits[i] = (float) (0.5 * std::exp (-t * 30.0) * sine (200.0, i)); }
+        const auto hOut = runSignal (id, { { "Amount", 4.0f }, { "Drift", 0.0f }, { "Smooth", 1.0f } }, hits, 0);
+        double hmin = 1e9, hmax = -1e9;
+        for (int k = 2; k < 14; ++k)
+        {
+            const size_t a0 = (size_t) ((k * 0.25 + 0.01) * kSr), a1 = (size_t) ((k * 0.25 + 0.06) * kSr);
+            const double dlt = bandDb (hOut, 100, 2000, a0, a1) - bandDb (hits, 100, 2000, a0, a1);
+            hmin = std::min (hmin, dlt); hmax = std::max (hmax, dlt);
+        }
+        expect ("humanizer: Hits: each hit gets its own level (spread dB, >= 2)", (float) std::min (2.0, hmax - hmin), 2.0f, 0.01f);
+    }
     // ---- Harmonic Resonator: notes in the set pass, others are filtered out
     {
         const int id = idForName ("Harmonic Resonator");

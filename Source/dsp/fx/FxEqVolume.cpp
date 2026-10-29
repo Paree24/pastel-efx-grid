@@ -432,6 +432,91 @@ private:
     int count = 0, timer = 0;
 };
 
+// ------------------------------------------------------------------ Humanizer
+// Amount, Drift, Rate, Sens, Div, Repeat, Smooth, Seed | Hits / Steps / Free
+// Small random level changes. Hits: a new random level at each detected hit
+// (fast vs slow follower, like the Transient Shaper); Steps: one per tempo
+// Div, optionally repeating every 1 / 2 / 4 bars so the feel loops with the
+// music; Free: at random moments (60-400 ms apart). Drift adds a slow,
+// smooth wander (Rate). Values are centred on 0 dB, so the average level
+// stays put. Taps: m[0] gain dB, m[1] history write index, m[2..49] history.
+class Humanizer : public FxImpl
+{
+public:
+    static constexpr int kHist = 48;
+    void prepare (double) override { reset(); }
+    void reset() override
+    {
+        for (auto& e : env) e.reset();
+        g = 0.0f; offDb = 0.0f; lastStep = -1; hits = 0; since = 1.0e9f; freeLeft = 0.0; freeCount = 0; driftT = 0.0; armed = true;
+        histPos = 0; histTimer = 0;
+    }
+    void process (float* L, float* R, int n, const FxContext& c) override
+    {
+        const float amount = c.p[0], drift = c.p[1], rate = c.p[2], sens = c.p[3];
+        const int seed = (int) std::lround (c.p[7]);
+        const float coef = msCoef (c.p[6], sr);
+        env[0].set (0.5f, 60.0f, sr);
+        env[1].set (25.0f, 300.0f, sr);   // slower release: a decaying hit falls under it and re-arms
+        const double divB = divBeatsOf (*def, c.p, 4);
+        static constexpr int kBars[4] = { 0, 1, 2, 4 };
+        const int bars = kBars[juce::jlimit (0, 3, ci (c, 5))];
+        const long long loopSteps = bars > 0 ? juce::jmax (1LL, (long long) std::llround ((double) bars * 4.0 / divB)) : 0;
+        const double minGap = 0.03 * sr;
+        for (int i = 0; i < n; ++i)
+        {
+            const float x = juce::jmax (std::abs (L[i]), std::abs (R[i]));
+            if (c.mode == 0)
+            {
+                const float e0 = env[0].process (x), e1 = env[1].process (x);
+                const float atk = gainToDb (e0) - gainToDb (e1);
+                since += 1.0f;
+                if (armed && atk > sens && gainToDb (e0) > -60.0f && since > minGap)
+                {
+                    ++hits; armed = false; since = 0.0f;
+                    offDb = amount * humanizeHash (seed, hits);
+                }
+                if (! armed && atk < sens * 0.4f) armed = true;
+            }
+            else if (c.mode == 1)
+            {
+                const double beat = c.ppq + c.beatsPerSample * i;
+                long long st = (long long) std::floor (beat / divB);
+                if (loopSteps > 0) st = ((st % loopSteps) + loopSteps) % loopSteps;
+                if (st != lastStep) { lastStep = st; offDb = amount * humanizeHash (seed, st); }
+            }
+            else
+            {
+                freeLeft -= 1.0;
+                if (freeLeft <= 0.0)
+                {
+                    ++freeCount;
+                    offDb = amount * humanizeHash (seed, freeCount);
+                    freeLeft = (0.06 + 0.34 * (0.5 + 0.5 * humanizeHash (seed + 1000, freeCount))) * sr;
+                }
+            }
+            // smooth value noise for the drift: cosine-interpolated random points, Rate per second
+            driftT += rate / sr;
+            const long long k = (long long) std::floor (driftT);
+            const float f = (float) (driftT - (double) k), w = 0.5f - 0.5f * std::cos (f * kPi);
+            const float dn = humanizeHash (seed + 500, k) * (1.0f - w) + humanizeHash (seed + 500, k + 1) * w;
+            const float target = offDb + drift * dn;
+            g += (target - g) * coef;
+            const float lin = dbToGain (g);
+            L[i] *= lin; R[i] *= lin;
+            if (++histTimer >= (int) (0.02 * sr)) { histTimer = 0; taps->set (2 + histPos, g); histPos = (histPos + 1) % kHist; taps->set (1, (float) histPos); }
+        }
+        taps->set (0, g);
+    }
+private:
+    EnvFollower env[2];
+    float g = 0.0f, offDb = 0.0f, since = 1.0e9f;
+    long long lastStep = -1, hits = 0, freeCount = 0;
+    double freeLeft = 0.0, driftT = 0.0;
+    bool armed = true;
+    int histPos = 0, histTimer = 0;
+};
+
 // ------------------------------------------------------------------ Transient Shaper
 // Attack, Sustain, Speed, Clip, Out, Release, Decay
 // Two followers with the same release but different attacks: their gap (dB)
@@ -622,6 +707,7 @@ std::unique_ptr<FxImpl> makeEqVolumeFx (const juce::String& n)
     if (n == "Hum Remover")      return std::make_unique<HumRemover>();
     if (n == "Click Remover")    return std::make_unique<ClickRemover>();
     if (n == "Transient Shaper") return std::make_unique<TransientShaper>();
+    if (n == "Humanizer")        return std::make_unique<Humanizer>();
     if (n == "Ducker")           return std::make_unique<Ducker>();
     if (n == "Trance Gate")      return std::make_unique<TranceGate>();
     if (n == "Gain")             return std::make_unique<GainFx>();

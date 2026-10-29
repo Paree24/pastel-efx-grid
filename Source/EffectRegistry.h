@@ -33,7 +33,7 @@ enum Viz
     VizPlate, VizSpring, VizShimmer, VizAlgo, VizConv, VizSimpleDly, VizPrecDly,
     VizPingPong, VizSpecDly, VizEcho, VizWarp, VizGranDly, VizSpecComp, VizResSupp,
     VizExciter, VizGranular, VizTimeStretch, VizReverse, VizTapeStop, VizStutter,
-    VizShuffler, VizSlicer, VizGlitch, VizChordDet, VizHarmRes, VizMbGate, NumViz
+    VizShuffler, VizSlicer, VizGlitch, VizChordDet, VizHarmRes, VizMbGate, VizHumanizer, VizTalkbox, NumViz
 };
 
 // how a 0..1 knob position maps to a physical value / display string

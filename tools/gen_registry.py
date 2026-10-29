@@ -58,7 +58,7 @@ VIZ_CAMEL = {
     "ressupp": "VizResSupp", "exciter": "VizExciter", "granular": "VizGranular",
     "timestretch": "VizTimeStretch", "reverse": "VizReverse", "tapestop": "VizTapeStop",
     "stutter": "VizStutter", "shuffler": "VizShuffler", "slicer": "VizSlicer",
-    "glitch": "VizGlitch", "chorddet": "VizChordDet", "harmres": "VizHarmRes", "mbgate": "VizMbGate",
+    "glitch": "VizGlitch", "chorddet": "VizChordDet", "harmres": "VizHarmRes", "mbgate": "VizMbGate", "humanizer": "VizHumanizer", "talkbox": "VizTalkbox",
 }
 
 LOG_KINDS = ("Hz", "Ms", "Sec", "Ratio", "Factor")

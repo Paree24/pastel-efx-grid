@@ -172,6 +172,10 @@ static const char* const CH_88_1[] = { "1/1", "1/2", "1/2D", "1/2T", "1/4", "1/4
 static const char* const M_89[] = { "Chord", "Notes" };
 static const char* const CH_89_4[] = { "Sharps", "Flats" };
 static const char* const M_90[] = { "Int", "Ext" };
+static const char* const M_91[] = { "Hits", "Steps", "Free" };
+static const char* const CH_91_4[] = { "1/1", "1/2", "1/2D", "1/2T", "1/4", "1/4D", "1/4T", "1/8", "1/8D", "1/8T", "1/16", "1/16D", "1/16T", "1/32", "1/64" };
+static const char* const CH_91_5[] = { "Off", "1 bar", "2 bars", "4 bars" };
+static const char* const M_92[] = { "Ext" };
 static const char* const LM_0[] = { "Bars", "Line" };
 static const char* const LCH_0_1[] = { "Fast", "Med", "Slow" };
 static const char* const LCH_0_3[] = { "Off", "On" };
@@ -2116,8 +2120,48 @@ extern const EffectDef kEffects[] = {
         { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu } },
       11, M_90, 2, 1.000000f,
       { 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.250000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f } },
+    { "Humanizer", CatVolume, VizHumanizer,
+      "Small random level changes so repeated parts sound played: per hit, per step (repeating with the bar if you like) or at random moments, plus a slow drift. The average level stays put.", "Feel",
+      { { "Amount", K::Db, 0.000000f, 6.000000f, 0.250000f, "", nullptr, 0, -2, 0xffffffffu },
+        { "Drift", K::Db, 0.000000f, 6.000000f, 0.133333f, "", nullptr, 0, -2, 0xffffffffu },
+        { "Rate", K::Hz, 0.050000f, 4.000000f, 0.474539f, "", nullptr, 0, -2, 0xffffffffu },
+        { "Sens", K::Db, 2.000000f, 24.000000f, 0.272727f, "", nullptr, 0, -1, 0x1u },
+        { "Div", K::Choice, 0.0f, 14.000000f, 0.714286f, "", CH_91_4, 15, -1, 0x2u },
+        { "Repeat", K::Choice, 0.0f, 3.000000f, 0.333333f, "", CH_91_5, 4, -1, 0x2u },
+        { "Smooth", K::Ms, 1.000000f, 50.000000f, 0.531551f, "", nullptr, 0, -2, 0xffffffffu },
+        { "Seed", K::Int, 0.000000f, 99.000000f, 0.070707f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu } },
+      8, M_91, 3, 1.000000f,
+      { 0.416667f, 0.366667f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f } },
+    { "Talkbox", CatPitch, VizTalkbox,
+      "The sidechain (a voice) shapes the input (a synth) like a mouth: the synth's notes, the voice's words. Route a voice to the sidechain.", "Mouth",
+      { { "Detail", K::Int, 12.000000f, 48.000000f, 0.444444f, "", nullptr, 0, -2, 0xffffffffu },
+        { "Window", K::Ms, 10.000000f, 40.000000f, 0.568752f, "", nullptr, 0, -2, 0xffffffffu },
+        { "Bright", K::Pct, 0.000000f, 1.000000f, 0.700000f, "", nullptr, 0, -2, 0xffffffffu },
+        { "Whiten", K::Pct, 0.000000f, 1.000000f, 1.000000f, "", nullptr, 0, -2, 0xffffffffu },
+        { "Gate", K::Db, -80.000000f, -20.000000f, 0.333333f, "", nullptr, 0, -2, 0xffffffffu },
+        { "Out", K::Db, -12.000000f, 12.000000f, 0.500000f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu },
+        { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu } },
+      6, M_92, 1, 1.000000f,
+      { 0.000000f, 0.000000f, 0.300000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f } },
 };
-extern const int kNumEffects = 91;
+extern const int kNumEffects = 93;
 
 extern const LegacyDef kLegacyV2[] = {
     { "Spectrum Analyzer", { { "Range", K::Db, 30.000000f, 120.000000f, 0.666667f, "", nullptr, 0, -2, 0xffffffffu }, { "Speed", K::Choice, 0.0f, 2.000000f, 0.500000f, "", LCH_0_1, 3, -2, 0xffffffffu }, { "Tilt", K::Lin, 0.000000f, 6.000000f, 0.500000f, "dB/oct", nullptr, 0, -2, 0xffffffffu }, { "Peak", K::Choice, 0.0f, 1.000000f, 1.000000f, "", LCH_0_3, 2, -2, 0xffffffffu }, { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu }, { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu }, { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu }, { "", K::Lin, 0.0f, 1.0f, 0.0f, "", nullptr, 0, -2, 0xffffffffu } }, 4, LM_0, 2 },

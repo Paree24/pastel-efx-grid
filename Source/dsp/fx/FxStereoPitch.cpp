@@ -608,10 +608,184 @@ private:
     juce::Random rng;
 };
 
+// ------------------------------------------------------------------ Talkbox
+// Detail, Window, Bright, Whiten, Gate, Out | Ext
+// The voice on the sidechain shapes the input (a synth) like a mouth shapes
+// the sound in a talk box tube. Linear prediction, not a filter bank:
+//   every quarter window the voice (pre-emphasised: Bright) is windowed and
+//   solved for an all-pole vocal-tract model (Levinson-Durbin, Detail poles);
+//   the carrier is flattened by its own short model (Whiten) so its harmonics
+//   are even, then runs through the voice's all-pole filter. Both filters are
+//   lattices whose reflection coefficients glide between analyses (always
+//   stable, no clicks); the level follows the voice's prediction residual,
+//   and the emphasis is undone at the end. No sidechain: the input passes.
+// Taps: spec[] = the vocal-tract curve (dB) on a log axis 60 Hz .. 8 kHz.
+class Talkbox : public FxImpl
+{
+public:
+    static constexpr int kMaxOrder = 48, kCarOrder = 16, kMaxN = 4096;
+    void prepare (double) override
+    {
+        voice.assign (kMaxN, 0.0f); car.assign (kMaxN, 0.0f); win.assign (kMaxN, 0.0f); work.assign (kMaxN, 0.0f);
+        lastA.reserve (kMaxOrder + 1);   // (analyse runs on the audio thread: no allocation there)
+        reset();
+    }
+    void reset() override
+    {
+        std::fill (voice.begin(), voice.end(), 0.0f); std::fill (car.begin(), car.end(), 0.0f);
+        w = 0; hopCount = 0; frameN = 0; vPrev = 0.0f;
+        for (auto* a : { kv, kvTo, dkv, kc, kcTo, dkc }) std::fill (a, a + kMaxOrder + 1, 0.0f);
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            std::fill (fir[ch], fir[ch] + kMaxOrder + 1, 0.0f);
+            std::fill (iir[ch], iir[ch] + kMaxOrder + 1, 0.0f);
+            resRms[ch] = rawRms[ch] = 1.0e-6f; yPrev[ch] = 0.0f;
+        }
+        gainV = gainTo = dGain = 0.0f; left = 0;
+    }
+    void process (float* L, float* R, int n, const FxContext& c) override
+    {
+        const bool hasVoice = c.scL != nullptr && c.scR != nullptr;
+        taps->set (1, hasVoice ? 1.0f : 0.0f);
+        if (! hasVoice) return;   // nothing to speak with: the input passes
+        const int order = juce::jlimit (12, kMaxOrder, (int) std::lround (c.p[0]));
+        const int N = juce::jlimit (256, kMaxN, (int) (c.p[1] * 0.001f * (float) sr));
+        if (N != frameN)
+        {
+            frameN = N; winE = 0.0f;
+            for (int j = 0; j < N; ++j) { win[(size_t) j] = 0.5f - 0.5f * std::cos (kTwoPi * (float) j / (float) (N - 1)); winE += win[(size_t) j] * win[(size_t) j]; }
+        }
+        const int hop = juce::jmax (32, N / 4);
+        const float pre = 0.4f + 0.55f * c.p[2];
+        const float whiten = c.p[3], gateDb = c.p[4], outG = dbToGain (c.p[5]);
+        const float rmsCoef = 1.0f / (float) N;
+        for (int i = 0; i < n; ++i)
+        {
+            const float v = 0.5f * (c.scL[i] + c.scR[i]);
+            voice[(size_t) w] = v - pre * vPrev; vPrev = v;
+            car[(size_t) w] = 0.5f * (L[i] + R[i]);
+            w = (w + 1) % kMaxN;
+            if (++hopCount >= hop) { hopCount = 0; analyse (order, pre, gateDb, hop); }
+            if (left > 0)
+            {
+                --left;
+                for (int m = 1; m <= order; ++m) { kv[m] += dkv[m]; }
+                for (int m = 1; m <= kCarOrder; ++m) { kc[m] += dkc[m]; }
+                gainV += dGain;
+            }
+            float* io[2] = { L + i, R + i };
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                const float x = *io[ch];
+                // flatten the carrier: lattice FIR with its own reflection coefficients
+                float f = x, gcur = x;
+                for (int m = 1; m <= kCarOrder; ++m)
+                {
+                    const float gd = fir[ch][m - 1];
+                    const float fn = f + kc[m] * gd, gn = kc[m] * f + gd;
+                    fir[ch][m - 1] = gcur;
+                    f = fn; gcur = gn;
+                }
+                resRms[ch] += (f * f - resRms[ch]) * rmsCoef;
+                rawRms[ch] += (x * x - rawRms[ch]) * rmsCoef;
+                const float exc = whiten * f / std::sqrt (resRms[ch] + 1.0e-12f) + (1.0f - whiten) * x / std::sqrt (rawRms[ch] + 1.0e-12f);
+                // the voice's vocal tract: all-pole lattice
+                float y = exc;
+                for (int m = order; m >= 1; --m)
+                {
+                    y -= kv[m] * iir[ch][m - 1];
+                    iir[ch][m] = kv[m] * y + iir[ch][m - 1];
+                }
+                iir[ch][0] = y;
+                y *= gainV;
+                // undo the pre-emphasis
+                y += pre * yPrev[ch];
+                yPrev[ch] = y;
+                *io[ch] = loopSat (y) * outG;
+            }
+        }
+    }
+private:
+    // last N samples of a ring, windowed, into work[0..N)
+    void frame (const std::vector<float>& ring)
+    {
+        for (int j = 0; j < frameN; ++j) work[(size_t) j] = ring[(size_t) ((w - frameN + j + kMaxN) % kMaxN)] * win[(size_t) j];
+    }
+    // autocorrelation + Levinson-Durbin: reflection coefficients k[1..p] (A(z) = 1 + sum a_j z^-j); returns the residual energy
+    float levinson (int p, float* k)
+    {
+        double r[kMaxOrder + 1];
+        for (int lag = 0; lag <= p; ++lag)
+        {
+            double acc = 0.0;
+            for (int j = lag; j < frameN; ++j) acc += (double) work[(size_t) j] * work[(size_t) (j - lag)];
+            r[lag] = acc;
+        }
+        r[0] = r[0] * 1.0001 + 1.0e-12;   // a touch of white noise keeps the model well-conditioned
+        double a[kMaxOrder + 1] = { 1.0 }, tmp[kMaxOrder + 1];
+        double e = r[0];
+        for (int m = 1; m <= p; ++m)
+        {
+            double acc = r[m];
+            for (int j = 1; j < m; ++j) acc += a[j] * r[m - j];
+            double km = -acc / e;
+            km = juce::jlimit (-0.999, 0.999, km);
+            for (int j = 1; j < m; ++j) tmp[j] = a[j] + km * a[m - j];
+            for (int j = 1; j < m; ++j) a[j] = tmp[j];
+            a[m] = km;
+            k[m] = (float) km;
+            e *= (1.0 - km * km);
+        }
+        lastA.assign (a, a + p + 1);
+        return (float) juce::jmax (0.0, e);
+    }
+    void analyse (int order, float pre, float gateDb, int hop)
+    {
+        frame (voice);
+        double e0 = 0.0;
+        for (int j = 0; j < frameN; ++j) e0 += (double) work[(size_t) j] * work[(size_t) j];
+        const float resE = levinson (order, kvTo);
+        for (int m = order + 1; m <= kMaxOrder; ++m) kvTo[m] = 0.0f;
+        // level: the voice's residual; below the gate the mouth closes
+        const float levelDb = 10.0f * std::log10 ((float) e0 / juce::jmax (1.0e-9f, winE) + 1.0e-12f);
+        gainTo = levelDb < gateDb ? 0.0f : std::sqrt (resE / juce::jmax (1.0e-9f, winE));
+        // the vocal-tract curve for the display
+        for (int b = 0; b < VizTaps::kSpec; ++b)
+        {
+            const double f = 60.0 * std::pow (8000.0 / 60.0, (double) b / (double) (VizTaps::kSpec - 1));
+            const double wv = kTwoPi * f / sr;
+            double re = 0.0, im = 0.0;
+            for (int j = 0; j < (int) lastA.size(); ++j) { re += lastA[(size_t) j] * std::cos (wv * j); im -= lastA[(size_t) j] * std::sin (wv * j); }
+            const double mag = gainTo / juce::jmax (1.0e-9, std::sqrt (re * re + im * im));
+            // (undo the emphasis so the curve shows the voice as heard)
+            const double deemph = 1.0 / std::sqrt (1.0 + pre * pre - 2.0 * pre * std::cos (wv));
+            taps->spec[(size_t) b].store ((float) (20.0 * std::log10 (mag * deemph + 1.0e-9)), std::memory_order_relaxed);
+        }
+        frame (car);
+        levinson (kCarOrder, kcTo);
+        for (int m = 1; m <= kMaxOrder; ++m) dkv[m] = (kvTo[m] - kv[m]) / (float) hop;
+        for (int m = 1; m <= kCarOrder; ++m) dkc[m] = (kcTo[m] - kc[m]) / (float) hop;
+        dGain = (gainTo - gainV) / (float) hop;
+        left = hop;
+        taps->set (0, levelDb);
+    }
+
+    std::vector<float> voice, car, win, work;
+    std::vector<double> lastA { 1.0 };
+    int w = 0, hopCount = 0, frameN = 0, left = 0;
+    float vPrev = 0.0f, winE = 1.0f;
+    float kv[kMaxOrder + 1] {}, kvTo[kMaxOrder + 1] {}, dkv[kMaxOrder + 1] {};
+    float kc[kMaxOrder + 1] {}, kcTo[kMaxOrder + 1] {}, dkc[kMaxOrder + 1] {};
+    float fir[2][kMaxOrder + 1] {}, iir[2][kMaxOrder + 1] {};
+    float resRms[2] {}, rawRms[2] {}, yPrev[2] {};
+    float gainV = 0.0f, gainTo = 0.0f, dGain = 0.0f;
+};
+
 } // namespace
 
 std::unique_ptr<FxImpl> makeStereoPitchFx (const juce::String& n)
 {
+    if (n == "Talkbox")            return std::make_unique<Talkbox>();
     if (n == "Harmonic Resonator") return std::make_unique<HarmResonator>();
     if (n == "Stereo Width")      return std::make_unique<StereoWidth>();
     if (n == "Haas Effect")       return std::make_unique<Haas>();

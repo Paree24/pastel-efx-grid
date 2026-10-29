@@ -1,7 +1,7 @@
 # Pastel EFX Grid
 
 A JUCE audio plugin (VST3 + Standalone) that presents a **4×4 grid of 16 effect
-slots**. Each slot can load any of **91 effects**, in a dark/pastel theme.
+slots**. Each slot can load any of **93 effects**, in a dark/pastel theme.
 
 The 16 slots are chained in series, left-to-right, top-to-bottom. Every slot has
 an effect, a mode, up to sixteen controls of its own, a user-routable macro, a
@@ -34,7 +34,15 @@ carry the whole slot state (values, mode, mix, bypass, macro routing, wavetable)
   table is embedded in the session (up to 64 frames, 16-bit).
 - **Sidechain**: the plugin has an optional stereo sidechain bus. *Sidechain
   Comp*, *Ducker* and *Vocoder* use it in their *Ext* mode (falling back to the
-  input when nothing is connected).
+  input when nothing is connected). The *Talkbox* needs it: put the voice on
+  the sidechain and the synth on the main input; the voice's mouth shape (an
+  LPC vocal-tract filter, updated about every 5 ms) is imposed on the synth's
+  notes. With no sidechain the input passes unchanged.
+- **Humanizer** (Volume): small random level changes so repeated parts sound
+  played. *Hits* gives every detected hit its own level, *Steps* one level per
+  tempo step (optionally repeating every 1, 2 or 4 bars), *Free* changes at
+  random moments; *Drift* adds a slow wander. The pattern comes from *Seed*, so
+  a render is repeatable, and the average level stays put.
 
 ## Effect sequencer
 
@@ -168,7 +176,7 @@ For slot `N` (0-based IDs, shown to hosts as `S01 …` to `S16 …`):
 
 | id               | type   | notes                                         |
 |------------------|--------|-----------------------------------------------|
-| `sN_fx`          | choice | 0 = Empty, 1..91 = effect                     |
+| `sN_fx`          | choice | 0 = Empty, 1..93 = effect                     |
 | `sN_mode`        | choice | 4 entries, clamped to the effect's mode count |
 | `sN_p0`..`sN_p15` | float | 0..1, the effect's controls (unused ones idle) |
 | `sN_macro`       | float  | 0..1                                          |

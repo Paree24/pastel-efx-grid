@@ -44,6 +44,16 @@ private:
 };
 
 // ---------------------------------------------------------------
+// Humanizer: a repeatable random value in -1..1 for (seed, index), shared by
+// the DSP and the visual (Steps mode draws the exact per-step levels)
+inline float humanizeHash (int seed, long long i)
+{
+    uint64_t x = (uint64_t) (i * 0x9E3779B97F4A7C15ull) ^ ((uint64_t) (seed + 1) * 0xBF58476D1CE4E5B9ull);
+    x ^= x >> 31; x *= 0x94D049BB133111EBull; x ^= x >> 29;
+    return (float) ((double) (x >> 11) / (double) (1ull << 53)) * 2.0f - 1.0f;
+}
+
+// ---------------------------------------------------------------
 // Chord qualities the Chord Detector matches: intervals from the root (up to
 // six notes, -1 = unused). Shared by the detector and its visual. Earlier
 // entries win ties, so plainer chords come first; no two entries share a
